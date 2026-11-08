@@ -11,7 +11,7 @@
 | `/var/lib/qya/` | 运行用户家目录；数据库、记忆、表情包、媒体、工作目录、制作目录 `workspace/starlibrary_covers` | tangyuge |
 | `/etc/systemd/system/qya.service` | `qya --qq`，User=tangyuge，Restart=always，日志进 journald | root |
 | `/etc/sudoers.d/tangyuge` | `tangyuge ALL=(ALL) NOPASSWD: ALL` | root 440 |
-| `/usr/local/bin/rtk` | RTK | root |
+| `/usr/local/bin/rtk`（`rtk.prev` 为上一版） | RTK 1.2.0（官方 x86_64 musl 包；升级方法见下文“升级 RTK”） | root |
 | `/opt/tangyuge-douyin`、`/var/lib/tangyuge-douyin`、`/run/tangyuge-douyin/login.sock` | 抖音服务（`tangyuge-douyin.service`，运行用户 douyin-runner，源码同步在本仓库 `ops/douyin/`） | douyin-runner |
 | `/etc/tangyuge-douyin.env` | `DOUYIN_ALLOWED_UID`（tangyuge 的 UID 997）、`DOUYIN_GATEWAY_UNIT=qya.service`、`DOUYIN_EXPECTED_ACCOUNT` | root 600 |
 
@@ -40,6 +40,10 @@ ssh root@<server> 'chmod 755 /opt/qya/bin/qya.new && cp -a /opt/qya/bin/qya /opt
 回退到上一版程序：`mv /opt/qya/bin/qya.prev /opt/qya/bin/qya && systemctl restart qya`。
 
 只改人格资产或技能时重新上传对应目录，然后在 QQ 发 `/reload`（S2 记忆快照在新会话或压缩后生效）。
+
+## 升级 RTK
+
+服务器直连 GitHub 很慢，在本机下载 `rtk-x86_64-unknown-linux-musl.tar.gz` 与 `checksums.txt`，核对 SHA256 后上传，服务器上再核对一次；解压后以 `tangyuge` 身份在 `/var/lib/qya`（服务工作目录）下测试 `rtk rewrite "git status"` 返回 3 并输出 `rtk git status`、`rtk rewrite "echo hi"` 返回 1，再保留 `rtk.prev` 原子替换。注意：在 `tangyuge` 无权访问的目录（如 `/root`）下测试，1.x 会对所有命令返回 1。
 
 ## 抖音成片入库（本机）
 
