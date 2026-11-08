@@ -29,4 +29,4 @@
 `cover_pair` 配对，检查双槽预览后选择该 ID；9:16 不替代竖封面 3:4。
 
 旧 `covers/<期号>/<封面ID>/` 仍兼容。分类迁移不改图片、ID 和清单；不能同时保留同 ID 的多份目录。
-发布确认由阿颜发送“确认发布 <plan_id>”后程序直接提交，参数与校验见 qy-assistant `docs/01-architecture.md` 8.3。
+发布确认由阿颜发送“确认发布 <plan_id>”后程序直接提交，参数与校验见 qy-assistant `docs/06-tools-plugins.md` 第 3 节。

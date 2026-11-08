@@ -1,6 +1,6 @@
 //! OpenAI Chat Completions 兼容传输（kimi-code 现网使用）。
 //!
-//! kimi-code 实测要点（2026-11-07，见 docs/01-architecture.md 4.2）：
+//! kimi-code 实测要点（2026-11-07，见 docs/03-model-kernel.md 1.2）：
 //! - 思考模式恒开，`reasoning_effort` 仅接受 low/high/max；
 //! - 带工具调用的 assistant 消息回放时需非空 `reasoning_content`；
 //! - 缓存命中在 `usage.prompt_tokens_details.cached_tokens`（也可能出现在 `usage.cached_tokens`）。

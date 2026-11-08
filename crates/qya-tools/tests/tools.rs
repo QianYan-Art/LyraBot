@@ -96,7 +96,7 @@ async fn skills_from_repo() {
     let sv = SkillView::new(&dir).expect("仓库应有技能");
     assert!(sv.spec().description.contains("grill-me") && sv.spec().description.contains("qya-docs"));
     let r = sv.call(ctx(), json!({"name": "qya-docs"})).await;
-    assert!(!r.is_error && r.text.contains("docs/01-architecture.md"));
+    assert!(!r.is_error && r.text.contains("docs/01-architecture.md") && r.text.contains("docs/09-backlog.md"));
     let bad = sv.call(ctx(), json!({"name": "qya-docs", "file": "../../Cargo.toml"})).await;
     assert!(bad.is_error);
 }

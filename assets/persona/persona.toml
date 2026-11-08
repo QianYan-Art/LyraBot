@@ -1,4 +1,4 @@
-# 唐语歌人格资产清单。渲染规则见 docs/01-architecture.md 6.1。
+# 唐语歌人格资产清单。渲染规则见 docs/04-persona-memory.md 第 1 节。
 # card.json 是身份唯一来源（chara_card_v2）；core/ 常驻 S1；notes/ 按需经 persona_notes 工具读取。
 
 user_name = "阿颜"

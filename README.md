@@ -65,7 +65,7 @@ flowchart TD
 | `qya-platform` | QQ 官方机器人单聊、命令行 |
 | `apps/qya` | 装配、运行时、聊天命令 |
 
-设计细节见 [`docs/01-architecture.md`](docs/01-architecture.md)，需求与关键决策见 [`docs/00-PRD.md`](docs/00-PRD.md)、[`docs/02-decisions.md`](docs/02-decisions.md)。
+设计细节从 [`docs/01-architecture.md`](docs/01-architecture.md)（总览与文档索引）开始，按模块分为 `03`–`08` 六篇；需求与关键决策见 [`docs/00-PRD.md`](docs/00-PRD.md)、[`docs/02-decisions.md`](docs/02-decisions.md)，还没做的事见 [`docs/09-backlog.md`](docs/09-backlog.md)。
 
 ## 快速开始（本地命令行）
 

@@ -3,7 +3,7 @@
 use rusqlite::Connection;
 
 const MIGRATIONS: &[&str] = &[
-    // v1：初始 schema（docs/01-architecture.md 第 10 节）
+    // v1：初始 schema（docs/08-storage-operations.md 第 1 节）
     r#"
 CREATE TABLE sessions (
     id            INTEGER PRIMARY KEY,

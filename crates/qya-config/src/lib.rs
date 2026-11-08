@@ -121,7 +121,7 @@ pub struct PersonaConfig {
     pub tools: Vec<String>,
 }
 
-/// 表达/黑话学习参数（docs/01-architecture.md 6.3）。
+/// 表达/黑话学习参数（docs/04-persona-memory.md 第 3 节）。
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct LearnerSettings {
@@ -155,7 +155,7 @@ impl Default for LearnerSettings {
     }
 }
 
-/// 回复节奏参数（docs/01-architecture.md 6.2）。
+/// 回复节奏参数（docs/04-persona-memory.md 第 2 节）。
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PacerSettings {
@@ -181,7 +181,7 @@ impl Default for PacerSettings {
     }
 }
 
-/// 内置工具（docs/01-architecture.md 8.1）。路径均已解析为绝对路径。
+/// 内置工具（docs/06-tools-plugins.md 第 1 节）。路径均已解析为绝对路径。
 #[derive(Debug, Clone)]
 pub struct ToolsConfig {
     pub shell: ShellSettings,
@@ -255,7 +255,7 @@ fn d_python() -> String {
     "python3".into()
 }
 
-/// QQ 官方机器人（docs/01-architecture.md 9.1）。
+/// QQ 官方机器人（docs/07-platform-commands.md 第 2 节）。
 #[derive(Debug, Clone)]
 pub struct QqConfig {
     pub app_id: String,
@@ -313,7 +313,7 @@ struct RawPlatforms {
     qq: Option<RawQq>,
 }
 
-/// 抖音外部服务（docs/01-architecture.md 8.3）。
+/// 抖音外部服务（docs/06-tools-plugins.md 第 3 节）。
 #[derive(Debug, Clone)]
 pub struct DouyinConfig {
     /// 抖音服务的 Unix socket
@@ -332,7 +332,7 @@ struct RawDouyin {
     cache_dir: Option<PathBuf>,
 }
 
-/// 可插拔提供方（docs/01-architecture.md 8.2）：类别 → { active, providers{名 → 原始表} }。
+/// 可插拔提供方（docs/06-tools-plugins.md 第 2 节）：类别 → { active, providers{名 → 原始表} }。
 /// 各类别的字段由 qya-plugins 按 `kind` 解析，配置层只保证结构。
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PluginsConfig {
@@ -355,7 +355,7 @@ impl PluginsConfig {
     }
 }
 
-/// 多代理编排（docs/01-architecture.md 第 7 节）。
+/// 多代理编排（docs/05-orchestra.md）。
 #[derive(Debug, Clone)]
 pub struct OrchestraConfig {
     pub provider: String,

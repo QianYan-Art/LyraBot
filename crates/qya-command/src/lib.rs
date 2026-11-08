@@ -1,5 +1,5 @@
 //! 聊天命令解析。命令不经过模型，立即响应；帮助文本与解析共用一张表，保证一致。
-//! 完整命令设计见 docs/01-architecture.md 第 11 节，后续阶段逐步补齐。
+//! 完整命令设计见 docs/07-platform-commands.md 第 4 节，后续阶段逐步补齐。
 
 use qya_core::card::Card;
 

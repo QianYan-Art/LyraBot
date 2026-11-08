@@ -1,4 +1,4 @@
-//! qya 内置工具（docs/01-architecture.md 8.1）。
+//! qya 内置工具（docs/06-tools-plugins.md 第 1 节）。
 //!
 //! 通用：shell（RTK 改写、硬禁止、审计）、fs_read/fs_write/fs_patch/fs_search、memory、todo、cron、skill_view；
 //! 运维：komari_report、blog_sync、mail。

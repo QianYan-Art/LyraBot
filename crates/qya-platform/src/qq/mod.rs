@@ -1,4 +1,4 @@
-//! QQ 官方机器人单聊适配器（docs/01-architecture.md 9.1）。
+//! QQ 官方机器人单聊适配器（docs/07-platform-commands.md 第 2 节）。
 //!
 //! 网关：Hello(op10) → Identify(op2)/Resume(op6) → READY；按服务端间隔 80% 发送心跳(op1)；
 //! op7 重连并 Resume，op9 按是否可恢复决定 Resume 或重新 Identify；致命关闭码停止重连。

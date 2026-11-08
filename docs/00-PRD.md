@@ -2,7 +2,7 @@
 
 记录日期：2026-11-07
 状态：已经 grill-me 讨论确认，作为 `.mission/qy-assistant.csv` 的执行输入。
-关联：`docs/01-architecture.md`（技术细节）、`docs/02-decisions.md`（关键决策）。
+关联：`docs/01-architecture.md`（技术总览与文档索引，细节见 `03`–`08`）、`docs/02-decisions.md`（关键决策）、`docs/09-backlog.md`（还没做的事）。
 
 ## 1. 目标
 
@@ -41,7 +41,7 @@
 | 技能体系 | SKILL.md 兼容；保留 grill-me、grok-search、tangyuge-roleplay、mail-vps-ops，locator 改写为本项目文档定位 |
 | 看图/看视频 | 作为主模型原生多模态输入，不做独立工具 |
 | 语音识别 | 使用 QQ 自带 `asr_refer_text`；拿不到时交给能直接听音频的模型或如实说明；不在服务器常驻 whisper |
-| 聊天命令 | 重新设计，见架构文档第 11 节 |
+| 聊天命令 | 重新设计，见 `docs/07-platform-commands.md` 第 4 节 |
 
 ### 3.2 可插拔提供方（QQ 命令可调）
 

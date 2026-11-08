@@ -1,4 +1,4 @@
-//! 可插拔提供方（docs/01-architecture.md 8.2）：生图、语音合成、网页搜索、grok 搜索；另有代看视频的 watch_video。
+//! 可插拔提供方（docs/06-tools-plugins.md 第 2 节）：生图、语音合成、网页搜索、grok 搜索；另有代看视频的 watch_video。
 //!
 //! 配置结构为 `[plugins.<类别>] active = "名"` + `[plugins.<类别>.providers.<名>]`（含 `kind` 与各自字段）。
 //! 工具每次调用都从当前配置读取激活的提供方，因此 `/provider` 改动写回配置并 reload 后立即生效。

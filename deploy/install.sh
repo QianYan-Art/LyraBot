@@ -2,7 +2,7 @@
 # qya 服务器安装。以 root 运行；可重复执行，不覆盖已有的配置、记忆和数据。
 # 运行用户 tangyuge；抖音服务 tangyuge-douyin（需先存在其用户组）。
 # 用法：install.sh <暂存目录>（内含 qya 二进制、persona/ agents/ skills/ tools/ docs/ memory_seed/、qya.service、qya.server.toml，可选 secrets/）
-# docs/ 内为 00-PRD.md、01-architecture.md、02-decisions.md、deploy.md（即 deploy/README.md）与 qya.example.toml，供 qya-docs 技能在服务器上读取。
+# docs/ 内为仓库 docs/*.md（00–09）、deploy.md（即 deploy/README.md）与 qya.example.toml，供 qya-docs 技能在服务器上读取。
 # 首次生成配置时可用环境变量 QYA_QQ_APP_ID、QYA_QQ_OWNER 填入 QQ 机器人 AppID 与主人 user_openid。
 set -euo pipefail
 STAGE="${1:?需要暂存目录}"

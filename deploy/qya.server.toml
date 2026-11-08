@@ -50,7 +50,7 @@ effort = "low"
 assets_dir = "/opt/qya/persona"
 # memory_dir = "data/memory"   # 默认 <data_dir>/memory
 
-# 多代理编排（docs/01-architecture.md 第 7 节）
+# 多代理编排（docs/05-orchestra.md）
 [orchestra]
 default_model = "kimi-for-coding"
 default_effort = "high"
@@ -68,7 +68,7 @@ description = "创作：抖音发布、封面与生图"
 memory = "creator.md"
 tools = ["shell", "fs_read", "fs_write", "fs_patch", "fs_search", "todo", "skill_view", "web_search", "grok_search", "grok_fetch", "image_generate", "speak", "douyin_login", "douyin_content", "douyin_verification"]
 
-# 内置工具（docs/01-architecture.md 8.1）
+# 内置工具（docs/06-tools-plugins.md 第 1 节）
 [tools]
 skills_dir = "/opt/qya/skills"
 media_dir = "/var/lib/qya/media"
@@ -90,7 +90,7 @@ python = "python3"
 helper = "/opt/qya/tools/mail_vps_fetch.py"
 config = "secrets/mail_vps.toml"
 
-# 可插拔提供方（docs/01-architecture.md 8.2）；/provider 命令会改写这里
+# 可插拔提供方（docs/06-tools-plugins.md 第 2 节）；/provider 命令会改写这里
 [plugins.image]
 active = "default"
 [plugins.image.providers.default]
@@ -126,7 +126,7 @@ key_file = "secrets/grok.key"
 model = "grok-chat-fast"
 timeout_s = 120
 
-# QQ 官方机器人（docs/01-architecture.md 9.1）；secret 放 secrets/qq.secret，allowed_users 填主人的 user_openid
+# QQ 官方机器人（docs/07-platform-commands.md 第 2 节）；secret 放 secrets/qq.secret，allowed_users 填主人的 user_openid
 [platforms.qq]
 app_id = "__QQ_APP_ID__"
 secret_file = "secrets/qq.secret"
@@ -136,7 +136,7 @@ max_replies = 5             # 单条消息最多被动回复次数
 proactive_monthly_quota = 4 # 每月主动消息额度，用尽后延迟到阿颜下次说话
 inbox_dir = "/var/lib/qya/media/inbox"
 
-# 抖音外部服务（docs/01-architecture.md 8.3）。服务端允许的调用方为 tangyuge 用户与 qya.service
+# 抖音外部服务（docs/06-tools-plugins.md 第 3 节）。服务端允许的调用方为 tangyuge 用户与 qya.service
 [douyin]
 socket = "/run/tangyuge-douyin/login.sock"
 saved_covers_dir = "/var/lib/qya/workspace/starlibrary_covers"
@@ -147,13 +147,13 @@ compaction_ratio = 0.9
 compaction_keep_tokens = 20000
 max_tool_calls = 40
 
-# 回复节奏（docs/01-architecture.md 6.2）
+# 回复节奏（docs/04-persona-memory.md 第 2 节）
 [persona.pacer]
 debounce_ms = 1800
 max_wait_ms = 6000
 max_segments = 4
 
-# 表达与黑话学习（docs/01-architecture.md 6.3）
+# 表达与黑话学习（docs/04-persona-memory.md 第 3 节）
 [persona.learner]
 enabled = true
 model = "kimi-for-coding"

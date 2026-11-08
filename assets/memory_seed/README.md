@@ -14,4 +14,4 @@
 - TTS 用法：并入任务 12 的 speak 工具说明（scene/profile/reference 优先级、工作站离线如实说明）。
 - 表情包用法：并入任务 07 的 sticker 工具（不再用 MEDIA: 路径与方括号占位）。
 - 生图调用规则：并入任务 12 的 image_generate 工具说明。
-- 本地缓存路径速查：属于 Hermes 目录结构，qya 有自己的布局（架构文档第 10 节）。
+- 本地缓存路径速查：属于 Hermes 目录结构，qya 有自己的布局（`docs/08-storage-operations.md` 第 1 节）。
