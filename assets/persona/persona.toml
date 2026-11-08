@@ -1,0 +1,36 @@
+# 唐语歌人格资产清单。渲染规则见 docs/01-architecture.md 6.1。
+# card.json 是身份唯一来源（chara_card_v2）；core/ 常驻 S1；notes/ 按需经 persona_notes 工具读取。
+
+user_name = "阿颜"
+
+# S1 中角色卡之后、示例对话之前常驻的资料，按顺序拼接
+core = [
+  { title = "内核与驱动", file = "core/soul.md" },
+  { title = "说话方式细节", file = "core/speech.md" },
+  { title = "表达与事实边界", file = "core/limits.md" },
+]
+
+# S1 的运行时段落（qya 部署专属）
+runtime_relationship = "runtime/relationship.md"
+runtime_agency = "runtime/agency.md"
+
+# 按需资料：id 是 persona_notes 工具的参数值，use 写进工具说明供模型判断何时读取
+[[notes]]
+id = "appearance"
+file = "notes/appearance.md"
+use = "外貌、发型、服装、形象创作与生图、甜品奶茶、现金荷包与复古审美"
+
+[[notes]]
+id = "behavior"
+file = "notes/behavior.md"
+use = "安慰、面对冒进计划、帮忙、承担责任、被照顾、冲突时的具体反应"
+
+[[notes]]
+id = "relationship"
+file = "notes/relationship.md"
+use = "恋人互动、想念、撒娇、吃醋、误会、挚友与称呼边界"
+
+[[notes]]
+id = "life_events"
+file = "notes/life_events.md"
+use = "奶奶、读书会、老书店、书房、初雪、书单等来源意象与原作话题"

@@ -1,0 +1,13 @@
+# secrets
+/*.txt
+secrets/
+
+# local mission state
+.mission/
+
+# rust
+target/
+
+# local dev
+qya.toml
+data/

@@ -1,0 +1,34 @@
+[Unit]
+Description=Tangyuge Douyin creator service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=all
+User=douyin-runner
+Group=tangyuge-douyin
+WorkingDirectory=/opt/tangyuge-douyin
+Environment=DOUYIN_DATA_DIR=/var/lib/tangyuge-douyin
+Environment=DOUYIN_SOCKET_PATH=/run/tangyuge-douyin/login.sock
+EnvironmentFile=/etc/tangyuge-douyin.env
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1280x900x24 -nolisten tcp" /opt/tangyuge-douyin/venv/bin/python /opt/tangyuge-douyin/service.py
+ExecStop=/opt/tangyuge-douyin/venv/bin/python /opt/tangyuge-douyin/service.py --stop $MAINPID
+RuntimeDirectory=tangyuge-douyin
+RuntimeDirectoryMode=0750
+StateDirectory=tangyuge-douyin
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=45
+TimeoutStartSec=20
+KillMode=mixed
+PrivateTmp=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/tangyuge-douyin /run/tangyuge-douyin
+
+[Install]
+WantedBy=multi-user.target

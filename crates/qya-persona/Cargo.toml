@@ -1,0 +1,28 @@
+[package]
+name = "qya-persona"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aho-corasick = "1.1.5"
+async-trait = "0.1.92"
+jiff = "0.2.39"
+qya-agent = { version = "0.1.0", path = "../qya-agent" }
+qya-config = { version = "0.1.0", path = "../qya-config" }
+qya-core = { version = "0.1.0", path = "../qya-core" }
+qya-llm = { version = "0.1.0", path = "../qya-llm" }
+qya-store = { version = "0.1.0", path = "../qya-store" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio-util = "0.7.20"
+toml = "1.2.1"
+tracing = "0.1.44"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt", "macros"] }
+tokio-util = "0.7.20"

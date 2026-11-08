@@ -1,0 +1,26 @@
+# 邮件 VPS 连接配置示例。
+#
+# 真实文件放在服务器上的 ~/.hermes/mail_vps.toml，权限 600，不入仓库。
+# 本仓库是公开的，示例里的地址、端口和用户名都是占位符，不要回填真实值。
+#
+# 查找顺序：$HERMES_MAIL_VPS_CONFIG → $HERMES_HOME/mail_vps.toml → ~/.hermes/mail_vps.toml
+
+host = "mail-vps.example.invalid"
+port = 22
+
+# 读操作（list-mailboxes / read-mail / list-attachments / fetch-attachment）用受限 key。
+[readonly]
+user = "mailreader"
+key = "/home/hermes/.ssh/mail_vps_readonly_ed25519"
+
+# 写操作（send-mail / reply-mail / forward-mail / move-mail-to-trash / delete-mail）单独一把 key。
+[readwrite]
+user = "mailwriter"
+key = "/home/hermes/.ssh/mail_vps_readwrite_ed25519"
+
+# 附件与验证链接的本地落点。gateway 的缓存清理不覆盖这两个目录，
+# helper 每次调用时按 retention_hours 自行回收。
+[cache]
+attachments_dir = "/home/hermes/.hermes/cache/mail_attachments"
+links_dir = "/home/hermes/.hermes/cache/mail_verification_links"
+retention_hours = 24
