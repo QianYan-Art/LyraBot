@@ -467,12 +467,11 @@ impl Runtime {
         let fmt = |ms: i64| {
             jiff::Timestamp::from_millisecond(ms).map(|t| t.to_zoned(tz.clone()).strftime("%m-%d %H:%M").to_string()).unwrap_or_default()
         };
-        let mut c = Card::new("🗂", "会话与数据库");
+        let mut c = Card::new("📂", "会话与数据库");
         c.section("唐语歌最近的会话");
         for x in &list {
-            let mark = if x.id == cur { "▶" } else { "·" };
             let state = if x.id == cur { "当前" } else if x.status == "closed" { "已结束" } else { "历史" };
-            c.line(format!("{mark} #{} {state}｜{} 条｜{}", x.id, x.messages, fmt(x.updated_at)));
+            c.item(format!("#{} {state}｜{} 条｜{}", x.id, x.messages, fmt(x.updated_at)));
         }
         let label = |k: &str, st: &str| match (k, st) {
             ("persona", "active") => "唐语歌进行中",
@@ -849,7 +848,7 @@ impl Runtime {
                 let mut out = Card::new("🧠", "模型");
                 out.line(format!("当前 {}", s.model)).section("可选");
                 for m in p.models.keys() {
-                    out.line(if *m == s.model { format!("▶ {m}") } else { format!("· {m}") });
+                    out.item(if *m == s.model { format!("{m}（当前）") } else { m.clone() });
                 }
                 out.hint("切换：/model 名称").build()
             }
