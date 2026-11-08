@@ -23,6 +23,13 @@
 
 本机：`cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.36 -p qya`，把二进制、`assets/{persona,agents,tools,memory_seed}`、`skills/`、`deploy/{qya.service,qya.server.toml,install.sh}` 与 `secrets/{kimi.key,yuanbao.key}` 放进暂存目录上传，root 执行 `install.sh <暂存目录>` 后删除暂存目录。脚本可重复执行，不覆盖已存在的配置、凭据、记忆和数据；从 Hermes 迁移的步骤在 Hermes 不存在时自动跳过。
 
+## 统一基线（本地 = GitHub = 服务器）
+
+- 只从**干净且已推送**的提交构建：`git status` 为空、`git push` 完成后再 `cargo zigbuild`。二进制内嵌构建提交（有未提交改动时带 `-dirty`）。
+- 部署时把同一提交的 `persona/ agents/ tools/ skills/` 一并同步，并写入 `/opt/qya/VERSION`。
+- 核对：本地 `git rev-parse --short=12 HEAD`、GitHub `main`、服务器 `cat /opt/qya/VERSION` 与 `qya --version`（QQ 里 `/status` 首行）应为同一哈希。
+- 服务器专属的值（凭据、QQ 账号、提供方地址、抖音账号）只存在于 `/etc/qya` 与 `/etc/tangyuge-douyin.env`，不进仓库。
+
 ## 更新程序
 
 ```bash
