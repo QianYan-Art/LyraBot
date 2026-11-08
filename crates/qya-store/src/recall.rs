@@ -86,12 +86,45 @@ impl Store {
         .await
     }
 
-    /// 检索过往对话（新的在前），排除 `exclude` 会话（当前会话已在上下文里）。查询少于 3 字时退回子串扫描。
+    /// 检索过往对话（新的在前），排除 `exclude` 会话（当前会话已在上下文里）。
+    /// 查询按空白与常见分隔符拆成多个词，分别匹配后合并去重；不少于 3 字的词走 trigram 索引，更短的走子串扫描。
     pub async fn recall_search(&self, query: &str, exclude: SessionId, limit: u32) -> Result<Vec<RecallHit>> {
-        let q = query.trim().to_owned();
-        if q.is_empty() {
-            return Ok(Vec::new());
+        let mut terms: Vec<String> = Vec::new();
+        for t in query.split(|c: char| c.is_whitespace() || "，,、；;|".contains(c)).map(str::trim).filter(|t| !t.is_empty()) {
+            if !terms.iter().any(|x| x == t) {
+                terms.push(t.to_owned());
+            }
         }
+        let mut hits: Vec<RecallHit> = Vec::new();
+        for term in terms.into_iter().take(6) {
+            for h in self.recall_term(term, exclude, limit).await? {
+                if !hits.iter().any(|x| x.entry == h.entry) {
+                    hits.push(h);
+                }
+            }
+        }
+        hits.sort_by(|a, b| b.at.cmp(&a.at).then(b.entry.cmp(&a.entry)));
+        hits.truncate(limit as usize);
+        Ok(hits)
+    }
+
+    /// 之前会话里最近的若干条对话（新的在前），用于“上次聊了什么”而想不出关键词的情况。
+    pub async fn recall_recent(&self, exclude: SessionId, limit: u32) -> Result<Vec<RecallHit>> {
+        self.call(move |c| {
+            let mut st = c.prepare_cached(
+                "SELECT session, entry, role, at, text FROM recall_fts WHERE CAST(session AS INTEGER) != ?1
+                 ORDER BY CAST(entry AS INTEGER) DESC LIMIT ?2",
+            )?;
+            Ok(st
+                .query_map(params![exclude, limit], |r| {
+                    Ok(RecallHit { session: r.get(0)?, entry: r.get(1)?, role: r.get(2)?, at: r.get(3)?, text: r.get(4)? })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+    }
+
+    async fn recall_term(&self, q: String, exclude: SessionId, limit: u32) -> Result<Vec<RecallHit>> {
         self.call(move |c| {
             let map = |r: &rusqlite::Row<'_>| {
                 Ok(RecallHit { session: r.get(0)?, entry: r.get(1)?, role: r.get(2)?, at: r.get(3)?, text: r.get(4)? })
@@ -143,5 +176,12 @@ mod tests {
         assert_eq!(short.iter().map(|h| h.role.as_str()).collect::<Vec<_>>(), vec!["summary", "assistant", "user"]);
         assert!(s.recall_search("年糕", p, 10).await.unwrap().is_empty(), "排除指定会话在查询内完成");
         assert!(s.recall_search("100%", 0, 10).await.unwrap().is_empty());
+        // 多个词分别匹配后合并去重：一个词命中即可
+        let multi = s.recall_search("旅游 不爱吃饭，饮食", 0, 10).await.unwrap();
+        assert_eq!(multi.iter().map(|h| h.role.as_str()).collect::<Vec<_>>(), vec!["summary", "user"]);
+        // 最近对话：不需要关键词，排除指定会话
+        let recent = s.recall_recent(0, 2).await.unwrap();
+        assert_eq!(recent.iter().map(|h| h.role.as_str()).collect::<Vec<_>>(), vec!["summary", "assistant"]);
+        assert!(s.recall_recent(p, 10).await.unwrap().is_empty());
     }
 }

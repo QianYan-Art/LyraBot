@@ -313,7 +313,7 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料
 - `komari_report`：Python 版逐条移植为 Rust（同样的校验、错误码、口径），实测 13 台节点 12 台有效。
 - `blog_sync`：调用 `/usr/local/bin/blog-sync-kbase.sh`（1300 s），日志含“代理同步失败”时在汇报首行提示一次，不干预脚本。
 - `mail`：保留 Hermes 已验证的 `mail_vps_fetch.py`（仅标准库，经受限 SSH key；位于 `assets/tools/`），工具把结构化参数映射为命令行、做必填校验、解析 JSON，`media_tag/preferred_media_tag` 指向的附件与链接 txt 自动投递；写操作失败提示“不要重试、先 read 核实”。Python 只在邮件操作时启动，不在热路径。
-- `recall`（2026-11-08）：检索唐语歌与阿颜的过往对话（已结束的会话与压缩摘要），查询时先在一个事务里把检查点之后的新条目增量写入 FTS5 trigram 索引，再在 SQL 中排除当前会话后取最新 8 条，返回命中处前后约 60 字的片段（总计 ≤1500 字），注明日期与说话人。3 字以下的查询退回子串扫描。不用就没有任何常驻开销；GC 删除会话时一并删除索引并回调检查点（条目编号可能被复用）。
+- `recall`（2026-11-08）：检索唐语歌与阿颜的过往对话（已结束的会话与压缩摘要），查询时先在一个事务里把检查点之后的新条目增量写入 FTS5 trigram 索引，再在 SQL 中排除当前会话后取最新 8 条，返回命中处前后约 60 字的片段（总计 ≤1500 字），注明日期与说话人。查询可写多个说法（空格、顿号分隔，最多 6 个），分别匹配后合并去重；3 字以下的词退回子串扫描。query 留空时返回之前最近的 12 条对话（按时间正序）——服务器实测中“上次说去哪儿玩了”这类问题字面关键词对不上原话，靠这一模式找到。不用就没有任何常驻开销；GC 删除会话时一并删除索引并回调检查点（条目编号可能被复用）。
 - 工具分配：唐语歌 `persona.tools` 默认 image_generate、speak、web_search、cron、skill_view、recall（另有人格专属 persona_notes、delegate、agent_ctl、memory、sticker；注册了 watch_video 时自动带上）；worker 与专员的工具清单见配置 `[orchestra]`。
 
 ### 8.2 可插拔提供方（qya-plugins）

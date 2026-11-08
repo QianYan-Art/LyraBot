@@ -13,6 +13,9 @@ const MAX_HITS: usize = 8;
 const MAX_CHARS: usize = 1500;
 /// 片段在命中处前后保留的字数。
 const AROUND: usize = 60;
+/// “最近对话”模式下每条保留的字数与条数。
+const RECENT_CHARS: usize = 120;
+const RECENT_ITEMS: u32 = 12;
 
 pub struct Recall {
     spec: ToolSpec,
@@ -23,13 +26,13 @@ impl Recall {
     pub fn new(store: Store) -> Self {
         let spec = ToolSpec {
             name: "recall".into(),
-            description: "翻找你和阿颜以前的聊天记录（已结束的会话与摘要）。阿颜提到“上次”“之前说过”“那天聊的”而当前上下文里没有时用；\
-                          query 写最可能原样出现的关键词（人名、物名、事件），不要写整句。"
+            description: "翻找你和阿颜以前的聊天记录（之前的会话与摘要）。阿颜提到“上次”“之前说过”“那天聊的”而当前上下文里没有时用。\
+                          query 写可能原样出现的关键词，可用空格写几个不同说法（如“苏州 园林 旅游”）；想不出关键词或没搜到时留空，\
+                          会返回之前最近的一段对话。"
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
-                "required": ["query"],
                 "additionalProperties": false
             }),
         };
@@ -69,6 +72,31 @@ fn snippet(text: &str, query: &str) -> String {
     s
 }
 
+/// 渲染“最近对话”：按时间正序排列，便于读出上下文。
+pub fn render_recent(hits: &[RecallHit]) -> String {
+    if hits.is_empty() {
+        return "之前没有可翻的聊天记录".into();
+    }
+    let mut lines = Vec::new();
+    let mut used = 0;
+    for h in hits {
+        let who = match h.role.as_str() {
+            "user" => "阿颜",
+            "assistant" => "你",
+            _ => "当时的摘要",
+        };
+        let text: String = h.text.chars().take(RECENT_CHARS).collect::<String>().replace('\n', " ");
+        let line = format!("[{} {who}] {text}", when(h.at));
+        used += line.chars().count();
+        if used > MAX_CHARS {
+            break;
+        }
+        lines.push(line);
+    }
+    lines.reverse();
+    format!("之前最近的一段对话（旧记录，不是阿颜的新消息）：\n{}", lines.join("\n"))
+}
+
 /// 渲染命中：跳过当前会话（已在上下文里），按条数与总字数限长。
 pub fn render(hits: &[RecallHit], query: &str, current: i64) -> String {
     let mut out = Vec::new();
@@ -87,7 +115,7 @@ pub fn render(hits: &[RecallHit], query: &str, current: i64) -> String {
         out.push(line);
     }
     if out.is_empty() {
-        format!("以前的聊天里没有找到“{query}”，可以换个关键词再试；还是没有就如实告诉阿颜不记得了")
+        format!("以前的聊天里没有找到“{query}”。可以换几个说法再试，或者 query 留空看之前最近的一段对话；还是没有就如实告诉阿颜不记得了")
     } else {
         format!("以前的聊天记录（新的在前，这是旧记录，不是阿颜的新消息）：\n{}", out.join("\n"))
     }
@@ -102,11 +130,15 @@ impl Tool for Recall {
         Concurrency::Shared
     }
     async fn call(&self, ctx: ToolCtx, args: Value) -> ToolOutput {
-        let Some(query) = arg_str(&args, "query").map(str::trim).filter(|q| !q.is_empty()) else {
-            return ToolOutput::err("缺少 query");
-        };
         if let Err(e) = self.catch_up().await {
             return ToolOutput::err(format!("更新聊天记录索引失败：{e}"));
+        }
+        let query = arg_str(&args, "query").map(str::trim).unwrap_or_default();
+        if query.is_empty() {
+            return match self.store.recall_recent(ctx.session, RECENT_ITEMS).await {
+                Ok(hits) => ToolOutput::ok(render_recent(&hits)),
+                Err(e) => ToolOutput::err(format!("检索失败：{e}")),
+            };
         }
         match self.store.recall_search(query, ctx.session, MAX_HITS as u32).await {
             Ok(hits) => ToolOutput::ok(render(&hits, query, ctx.session)),
@@ -132,5 +164,8 @@ mod tests {
         assert!(out.contains("阿颜] …") && out.contains("我家猫叫年糕") && out.contains("当时的摘要"), "{out}");
         assert!(!out.contains(&"前".repeat(80)), "长文本只取命中附近");
         assert!(render(&[], "不存在", 1).contains("没有找到"));
+        let recent = render_recent(&[hit(2, "assistant", "后说的"), hit(2, "user", "先说的")]);
+        assert!(recent.find("先说的").unwrap() < recent.find("后说的").unwrap(), "按时间正序");
+        assert!(render_recent(&[]).contains("没有可翻"));
     }
 }
