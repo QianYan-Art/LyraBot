@@ -287,11 +287,11 @@ async fn continuation_uses_spare_slot_when_full() {
 }
 
 #[tokio::test]
-async fn message_arriving_while_finishing_runs_another_turn() {
-    let mut e = env(3, 150).await;
+async fn queued_message_for_busy_specialist_runs_another_turn() {
+    let mut e = env(3, 400).await;
     e.sup.delegate(req(e.persona, "第一件事", ContextMode::Fresh, Target::Specialist("ops".into()))).await.unwrap();
-    // 第一轮还在跑：再派的任务排进追问队列；即使它在本轮最后一次检查之后才到，收尾时也会接着跑
-    tokio::time::sleep(Duration::from_millis(140)).await;
+    // 第一轮还在跑：再派的任务排进追问队列（同时落库）；无论被本轮内核取走还是在收尾时剩下，都会被处理
+    tokio::time::sleep(Duration::from_millis(50)).await;
     let ack = e.sup.delegate(req(e.persona, "第二件事", ContextMode::Brief, Target::Specialist("ops".into()))).await.unwrap();
     assert!(ack.contains("排在"), "{ack}");
     let mut texts = Vec::new();

@@ -356,9 +356,6 @@ impl Runtime {
                 let reply = self.command(cmd).await.unwrap_or_else(|e| format!("命令失败：{e:#}"));
                 let _ = self.platform().send(Outbound::text(reply)).await;
             }
-            Some(Err(ParseError::Unknown(n))) => {
-                let _ = self.platform().send(Outbound::text(format!("没有 /{n} 这个命令，发 /help 看全部"))).await;
-            }
             Some(Err(ParseError::BadArgs(n))) => {
                 let _ = self.platform().send(Outbound::text(format!("参数不对：{}", qya_command::help(Some(&n))))).await;
             }

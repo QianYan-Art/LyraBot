@@ -59,13 +59,12 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
-    /// 以 / 开头但不是已知命令
-    Unknown(String),
     /// 已知命令但参数不对，附命令名
     BadArgs(String),
 }
 
-/// 解析一行输入。返回 `None` 表示这是普通聊天消息。
+/// 解析一行输入。返回 `None` 表示这是普通聊天消息：
+/// 只有已知命令才拦截，`/笑` 这类以 / 开头的普通说话照常交给唐语歌。
 pub fn parse(input: &str) -> Option<Result<Command, ParseError>> {
     let s = input.trim();
     let body = s.strip_prefix('/').or_else(|| s.strip_prefix('／'))?;
@@ -109,7 +108,7 @@ pub fn parse(input: &str) -> Option<Result<Command, ParseError>> {
             }
         },
         "reload" => Command::Reload,
-        _ => return Some(Err(ParseError::Unknown(name))),
+        _ => return None,
     }))
 }
 
@@ -167,7 +166,8 @@ mod tests {
         assert_eq!(parse(" /Model  k3-256k "), Some(Ok(Command::Model(Some("k3-256k".into())))));
         assert_eq!(parse("／new"), Some(Ok(Command::New)));
         assert_eq!(parse("/effort"), Some(Ok(Command::Effort(None))));
-        assert_eq!(parse("/foo"), Some(Err(ParseError::Unknown("foo".into()))));
+        assert_eq!(parse("/笑"), None, "不是已知命令的照常当聊天");
+        assert_eq!(parse("/foo bar"), None);
         assert_eq!(parse("/agent #7 stop"), Some(Ok(Command::Agent { id: 7, action: AgentAction::Stop })));
         assert_eq!(parse("/agent 7 再查一下日志"), Some(Ok(Command::Agent { id: 7, action: AgentAction::Say("再查一下日志".into()) })));
         assert_eq!(parse("/agent 7"), Some(Ok(Command::Agent { id: 7, action: AgentAction::Show })));
@@ -188,7 +188,7 @@ mod tests {
         let h = help(None);
         for (n, _, _) in COMMANDS {
             assert!(h.contains(&format!("/{n}")));
-            assert!(!matches!(parse(&format!("/{n}")), Some(Err(ParseError::Unknown(_)))), "表中的 /{n} 必须是已知命令");
+            assert!(parse(&format!("/{n}")).is_some(), "表中的 /{n} 必须是已知命令");
         }
         assert!(help(Some("/model")).contains("切换"));
     }
