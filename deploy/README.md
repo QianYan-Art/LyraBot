@@ -5,7 +5,7 @@
 | 路径 | 内容 | 属主 |
 |---|---|---|
 | `/opt/qya/bin/qya`（`qya.prev` 为上一版） | 程序 | root |
-| `/opt/qya/{persona,agents,skills,tools}` | 人格资产、执行者提示、技能、邮件 helper | root（只读） |
+| `/opt/qya/{persona,agents,skills,tools,docs}` | 人格资产、执行者提示、技能、邮件 helper、项目文档（供 qya-docs 技能读取） | root（只读） |
 | `/etc/qya/qya.toml` | 配置（`/provider` 会写回，故目录属运行用户） | tangyuge 640 |
 | `/etc/qya/secrets/` | kimi、元宝、生图、grok、QQ、Komari、邮件 SSH key 与配置 | tangyuge 600 |
 | `/var/lib/qya/` | 运行用户家目录；数据库、记忆、表情包、媒体、工作目录、制作目录 `workspace/starlibrary_covers` | tangyuge |
@@ -21,12 +21,12 @@
 
 ## 首次安装
 
-本机：`cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.36 -p qya`，把二进制、`assets/{persona,agents,tools,memory_seed}`、`skills/`、`deploy/{qya.service,qya.server.toml,install.sh}` 与 `secrets/`（文件名对应 `qya.server.toml` 中的 `*_file`，如 `kimi.key`、`yuanbao.key`、`qq.secret`）放进暂存目录上传，root 执行 `QYA_QQ_APP_ID=<AppID> QYA_QQ_OWNER=<user_openid> install.sh <暂存目录>` 后删除暂存目录。需先部署抖音服务（提供 `tangyuge-douyin` 组）并存在 `blogsync` 组。脚本可重复执行：程序与资产每次覆盖，暂存目录里给出的凭据同名覆盖，配置与记忆只在不存在时生成。邮件 helper 的配置格式见 `assets/tools/mail_vps.example.toml`，SSH 主机指纹放 `/var/lib/qya/.ssh/known_hosts`。
+本机：`cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.36 -p qya`，把二进制、`assets/{persona,agents,tools,memory_seed}`、`skills/`、`docs/`（组装方式见下文“统一基线”）、`deploy/{qya.service,qya.server.toml,install.sh}` 与 `secrets/`（文件名对应 `qya.server.toml` 中的 `*_file`，如 `kimi.key`、`yuanbao.key`、`qq.secret`）放进暂存目录上传，root 执行 `QYA_QQ_APP_ID=<AppID> QYA_QQ_OWNER=<user_openid> install.sh <暂存目录>` 后删除暂存目录。需先部署抖音服务（提供 `tangyuge-douyin` 组）并存在 `blogsync` 组。脚本可重复执行：程序与资产每次覆盖，暂存目录里给出的凭据同名覆盖，配置与记忆只在不存在时生成。邮件 helper 的配置格式见 `assets/tools/mail_vps.example.toml`，SSH 主机指纹放 `/var/lib/qya/.ssh/known_hosts`。
 
 ## 统一基线（本地 = GitHub = 服务器）
 
 - 只从**干净且已推送**的提交构建：`git status` 为空、`git push` 完成后再 `cargo zigbuild`。二进制内嵌构建提交（有未提交改动时带 `-dirty`）。
-- 部署时把同一提交的 `persona/ agents/ tools/ skills/` 一并同步，并写入 `/opt/qya/VERSION`。
+- 部署时把同一提交的 `persona/ agents/ tools/ skills/` 与 `docs/`（`docs/*.md`、`deploy/README.md` 改名 `deploy.md`、`config/qya.example.toml`）一并同步，并写入 `/opt/qya/VERSION`。
 - 核对：本地 `git rev-parse --short=12 HEAD`、GitHub `main`、服务器 `cat /opt/qya/VERSION` 与 `qya --version`（QQ 里 `/status` 首行）应为同一哈希。
 - 服务器专属的值（凭据、QQ 账号、提供方地址、抖音账号）只存在于 `/etc/qya` 与 `/etc/tangyuge-douyin.env`，不进仓库。
 

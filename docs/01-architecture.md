@@ -286,7 +286,7 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料
 - `memory`：§ 分隔条目，每文件 2000 字；按角色构造实例——唐语歌可写 `user`/`memory`，专员只可写自己的记忆文件（经编排的 extras 钩子注入）。
 - `todo`：会话内整表覆盖的步骤清单。原设计中的 `send` 工具未实现：执行者产出的媒体随〔后台结果〕由唐语歌那一轮一起发出，不需要执行者直接对阿颜说话。
 - `cron`：5 段表达式按北京时间（croner + jiff）；运行时每 30 s 检查到期任务，停机期间错过的只补一次；`remind` 以〔定时提醒〕消息交给唐语歌，`task` 派给指定执行者/专员并按 relay 交回；恢复暂停的任务以当前时间为基准，不补发。
-- `skill_view`：扫描 `skills/*/SKILL.md` frontmatter，技能清单写在工具说明里；当前技能 grill-me（迁移）、qya-docs（新写，替代 38 KB 的 hermes-md-locator）。mail-vps-ops、grok-search、tangyuge-roleplay 已分别由 mail 工具、grok 插件、persona_notes 取代。
+- `skill_view`：扫描 `skills/*/SKILL.md` frontmatter，技能清单写在工具说明里；当前技能 grill-me（迁移）、qya-docs（新写，替代 38 KB 的 hermes-md-locator；同时列服务器路径与仓库路径，部署时文档同步到 `/opt/qya/docs/`）。mail-vps-ops、grok-search、tangyuge-roleplay 已分别由 mail 工具、grok 插件、persona_notes 取代。
 - `komari_report`：Python 版逐条移植为 Rust（同样的校验、错误码、口径），实测 13 台节点 12 台有效。
 - `blog_sync`：调用 `/usr/local/bin/blog-sync-kbase.sh`（1300 s），日志含“代理同步失败”时在汇报首行提示一次，不干预脚本。
 - `mail`：保留 Hermes 已验证的 `mail_vps_fetch.py`（仅标准库，经受限 SSH key；位于 `assets/tools/`），工具把结构化参数映射为命令行、做必填校验、解析 JSON，`media_tag/preferred_media_tag` 指向的附件与链接 txt 自动投递；写操作失败提示“不要重试、先 read 核实”。Python 只在邮件操作时启动，不在热路径。
