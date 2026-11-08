@@ -308,7 +308,7 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料
 - `fs_read / fs_write / fs_patch / fs_search`：patch 要求 old 唯一（或 replace_all）；搜索优先 ripgrep，退回 grep。
 - `memory`：§ 分隔条目，每文件 2000 字；按角色构造实例——唐语歌可写 `user`/`memory`，专员只可写自己的记忆文件（经编排的 extras 钩子注入）。
 - `todo`：会话内整表覆盖的步骤清单。原设计中的 `send` 工具未实现：执行者产出的媒体随〔后台结果〕由唐语歌那一轮一起发出，不需要执行者直接对阿颜说话。
-- `cron`：5 段表达式按北京时间（croner + jiff）；运行时每 30 s 检查到期任务，停机期间错过的只补一次；`remind` 以〔定时提醒〕消息交给唐语歌，`task` 派给指定执行者/专员并按 relay 交回；恢复暂停的任务以当前时间为基准，不补发。
+- `cron`：5 段表达式按北京时间（croner + jiff）；运行时每 30 s 检查到期任务，停机期间错过的只补一次；`remind` 以〔定时提醒〕消息交给唐语歌，`task` 派给指定执行者/专员并按 relay 交回；恢复暂停的任务以当前时间为基准，不补发；动作带 `once: true` 的一次性任务（“明天 9 点”“11 月 10 日”这类具体某天的事）触发前即删除，不会第二年再响。
 - `skill_view`：扫描 `skills/*/SKILL.md` frontmatter，技能清单写在工具说明里；当前技能 grill-me（迁移）、qya-docs（新写，替代 38 KB 的 hermes-md-locator；同时列服务器路径与仓库路径，部署时文档同步到 `/opt/qya/docs/`）。mail-vps-ops、grok-search、tangyuge-roleplay 已分别由 mail 工具、grok 插件、persona_notes 取代。
 - `komari_report`：Python 版逐条移植为 Rust（同样的校验、错误码、口径），实测 13 台节点 12 台有效。
 - `blog_sync`：调用 `/usr/local/bin/blog-sync-kbase.sh`（1300 s），日志含“代理同步失败”时在汇报首行提示一次，不干预脚本。
@@ -478,7 +478,7 @@ pub trait Platform: Send + Sync {
 
 定时任务由唐语歌的 `cron` 工具管理（没有单独的聊天命令）；原设计中的 `/restart!` 未实现，进程重启由部署流程执行，重启时后台任务以“被中断”汇报交回。
 
-输出排版（2026-11-08）：QQ 单聊只显示纯文本、手机一行约 20 字，命令回复用【】分段、一行一到两项、段间空行，token 显示为 `12.3k` / `1.0M`，不用 Markdown 与竖线、破折号。
+输出排版（2026-11-08）：QQ 单聊只显示纯文本、手机一行约 20 字，命令回复统一由 `qya_core::card` 排版：标题带一个图标（📊 状态、🗂 会话、🌱 学习等），分节用「▍」，条目用「·」，操作提示用「💡」，上下文占用显示十格进度条；一句话回复成功前缀 ✅、失败或无法执行前缀 ⚠️。token 显示为 `12.3k` / `1.0M`，不用 Markdown 与表格。
 
 ## 12. 性能与长期运行
 

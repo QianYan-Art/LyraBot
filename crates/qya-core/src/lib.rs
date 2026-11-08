@@ -1,6 +1,7 @@
 //! qya 共享类型：消息、工具规格、用量、思考等级、内核事件。
 //! 本 crate 不依赖任何运行时，所有上层 crate 只通过这里交换数据。
 
+pub mod card;
 pub mod effort;
 pub mod event;
 pub mod media;

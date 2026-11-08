@@ -2,31 +2,30 @@
 //! 写回失败或新配置校验失败时恢复原文件，运行中的配置不变。
 
 use qya_config::ConfigHandle;
-use std::fmt::Write as _;
+use qya_core::card::Card;
 use toml_edit::{DocumentMut, Item, value};
 
 /// 列出各类别激活的提供方与其字段（`*_file` 只显示路径，不读取内容）。
 pub fn list(cfg: &ConfigHandle) -> String {
     let c = cfg.get();
     if c.plugins.categories.is_empty() {
-        return "还没有配置任何提供方".into();
+        return "🔌 还没有配置任何提供方".into();
     }
-    let mut s = String::new();
+    let mut card = Card::new("🔌", "提供方");
     for (cat, pc) in &c.plugins.categories {
-        let _ = writeln!(s, "【{cat}】当前 {}\n可选：{}", pc.active, pc.providers.keys().cloned().collect::<Vec<_>>().join("、"));
+        card.section(format!("{cat}｜当前 {}", pc.active));
+        card.line(format!("可选：{}", pc.providers.keys().cloned().collect::<Vec<_>>().join("、")));
         if let Some(t) = pc.providers.get(&pc.active) {
             for (k, v) in t {
                 let shown = match v {
                     toml::Value::String(x) => x.clone(),
                     other => other.to_string(),
                 };
-                let _ = writeln!(s, "  {k} = {shown}");
+                card.item(format!("{k} = {shown}"));
             }
         }
-        s.push('\n');
     }
-    s.push_str("修改：/provider 类别 字段 值\n切换：/provider 类别 use 名字");
-    s
+    card.hint("修改：/provider 类别 字段 值").hint("切换：/provider 类别 use 名字").build()
 }
 
 /// 解析值：整数、布尔按类型写入，其余按字符串。

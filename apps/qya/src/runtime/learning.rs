@@ -220,47 +220,46 @@ impl Runtime {
             LearnCmd::List(LearnScope::Expressions) => {
                 let all = self.store.expressions().await?;
                 if all.is_empty() {
-                    "还没有学到任何说法".into()
+                    "💬 还没有学到任何说法".into()
                 } else {
-                    let mut s = format!("【说法】共 {} 条，按权重显示前 20 条\n", all.len());
+                    let mut c = Card::new("💬", "学到的说法");
+                    c.line(format!("共 {} 条，按权重显示前 20 条", all.len()));
                     for e in all.iter().take(20) {
                         let kind = if e.kind == "habit" { "习惯" } else { "黑话" };
-                        s.push_str(&format!("\n#{} {kind}：{}\n  {}", e.id, e.text, e.meaning.as_deref().unwrap_or("-")));
+                        c.section(format!("#{} {}", e.id, e.text)).line(format!("{kind}｜{}", e.meaning.as_deref().unwrap_or("-")));
                     }
-                    s.push_str("\n\n删除某条发 /learn forget 编号");
-                    s
+                    c.hint("删除：/learn forget 编号").build()
                 }
             }
             LearnCmd::List(LearnScope::Memory) => {
                 let files = self.read_memory();
-                let sections: Vec<String> = TARGETS
-                    .iter()
-                    .map(|(name, label, prefix)| {
-                        let list = &files[*name];
-                        let body = if list.is_empty() {
-                            "（空）".to_owned()
-                        } else {
-                            list.iter().enumerate().map(|(i, e)| format!("{prefix}{} {e}", i + 1)).collect::<Vec<_>>().join("\n")
-                        };
-                        format!("【{label}】\n{body}")
-                    })
-                    .collect();
-                format!("{}\n\n删除某条发 /learn forget u3 或 m2\n改动在新会话生效", sections.join("\n\n"))
+                let mut c = Card::new("📝", "长期记忆");
+                for (name, label, prefix) in TARGETS {
+                    c.section(label);
+                    let list = &files[name];
+                    if list.is_empty() {
+                        c.line("（空）");
+                    }
+                    for (i, e) in list.iter().enumerate() {
+                        c.line(format!("{prefix}{} {e}", i + 1));
+                    }
+                }
+                c.hint("删除：/learn forget u3 或 m2").hint("改动在新会话生效").build()
             }
             LearnCmd::Forget(id) => self.forget(&id).await?,
             LearnCmd::On => {
                 self.store.kv_set(KV_LEARN_ENABLED, "on").await?;
                 if self.cfg.get().persona.learner.enabled {
-                    "学习已开启（说法与记忆）".into()
+                    card::ok("学习已开启（说法与记忆）")
                 } else {
-                    "已记录开启，但配置 persona.learner.enabled=false，仍不会自动学习".into()
+                    card::warn("已记录开启，但配置 persona.learner.enabled=false，仍不会自动学习")
                 }
             }
             LearnCmd::Off => {
                 self.store.kv_set(KV_LEARN_ENABLED, "off").await?;
-                "学习已暂停（不再学习说法、不再整理记忆）；已有的说法与记忆不受影响".into()
+                format!("{}\n已有的说法与记忆不受影响", card::ok("学习已暂停（不再学习说法、不再整理记忆）"))
             }
-            LearnCmd::Now => self.learn_once(true).await?.unwrap_or_default(),
+            LearnCmd::Now => format!("🌱 {}", self.learn_once(true).await?.unwrap_or_default()),
             LearnCmd::Undo => self.undo_consolidation().await?,
         })
     }
@@ -270,61 +269,64 @@ impl Runtime {
         let exprs = self.store.expressions().await?.len();
         let files = self.read_memory();
         let size = |name: &str| files[name].iter().map(|e| e.chars().count()).sum::<usize>();
-        let mem: Vec<String> = TARGETS
-            .iter()
-            .map(|(name, label, _)| format!("{label} {} 条（{}/{} 字）", files[*name].len(), size(name), qya_persona::MEMORY_FILE_LIMIT))
-            .collect();
         let pending = self.store.memory_candidates().await?.len();
-        let mut s = format!("【学习】{on}\n说法 {exprs} 条\n{}\n待整理的记忆候选 {pending} 条", mem.join("\n"));
+        let mut c = Card::new("🌱", "学习与记忆");
+        c.line(format!("自动学习：{on}")).section("现有").item(format!("说法 {exprs} 条"));
+        for (name, label, _) in TARGETS {
+            c.item(format!("{label} {} 条（{}/{} 字）", files[name].len(), size(name), qya_persona::MEMORY_FILE_LIMIT));
+        }
+        c.item(format!("待整理的记忆候选 {pending} 条"));
         match self.store.last_memory_revision().await? {
             Some(r) => {
                 let changes: Vec<String> = r.summary.lines().map(str::to_owned).collect();
-                s.push_str(&format!("\n\n【最近一次整理】{}\n{}", when(r.created_at), tally(&changes)));
+                c.section(format!("最近一次整理｜{}", when(r.created_at))).line(tally(&changes));
                 for line in changes.iter().take(5) {
-                    s.push_str(&format!("\n  {line}"));
+                    c.item(line);
                 }
                 if changes.len() > 5 {
-                    s.push_str(&format!("\n  …另有 {} 项", changes.len() - 5));
+                    c.line(format!("…另有 {} 项", changes.len() - 5));
                 }
             }
-            None => s.push_str("\n还没有整理过记忆"),
+            None => {
+                c.line("还没有整理过记忆");
+            }
         }
-        s.push_str("\n\n查看：/learn list 说法、/learn list 记忆\n撤销最近一次整理：/learn undo");
-        Ok(s)
+        c.hint("查看：/learn list 说法 或 记忆").hint("撤销最近一次整理：/learn undo");
+        Ok(c.build())
     }
 
     async fn forget(&self, id: &str) -> Result<String> {
         if let Ok(n) = id.parse::<i64>() {
             return Ok(if self.store.forget_expression(n).await? {
                 self.rebuild_index().await?;
-                format!("已删除说法 #{n}")
+                card::ok(format!("已删除说法 #{n}"))
             } else {
-                format!("没有说法 #{n}")
+                card::warn(format!("没有说法 #{n}"))
             });
         }
         let (prefix, idx) = id.split_at(1);
-        let Some((name, label, _)) = TARGETS.iter().find(|(_, _, p)| p.to_string() == prefix) else { return Ok(format!("没有 {id}")) };
-        let Some(i) = idx.parse::<usize>().ok().and_then(|n| n.checked_sub(1)) else { return Ok(format!("没有 {id}")) };
+        let Some((name, label, _)) = TARGETS.iter().find(|(_, _, p)| p.to_string() == prefix) else { return Ok(card::warn(format!("没有 {id}"))) };
+        let Some(i) = idx.parse::<usize>().ok().and_then(|n| n.checked_sub(1)) else { return Ok(card::warn(format!("没有 {id}"))) };
         let _g = self.memory_lock.lock().await;
         let mut list = self.read_memory().remove(*name).unwrap_or_default();
         if i >= list.len() {
-            return Ok(format!("【{label}】里没有 {id}，发 /learn list 记忆 查看编号"));
+            return Ok(card::warn(format!("「{label}」里没有 {id}，发 /learn list 记忆 查看编号")));
         }
         let old = list.remove(i);
         self.write_memory(name, &list)?;
-        Ok(format!("已删除 {id}：{old}（新会话生效）"))
+        Ok(format!("{}\n{old}\n新会话生效", card::ok(format!("已删除 {id}"))))
     }
 
     /// 撤销最近一次整理：只有记忆文件仍是那次整理的结果时才恢复，避免覆盖之后的手动修改。
     async fn undo_consolidation(&self) -> Result<String> {
         let _g = self.memory_lock.lock().await;
-        let Some(rev) = self.store.last_memory_revision().await? else { return Ok("没有可撤销的整理".into()) };
+        let Some(rev) = self.store.last_memory_revision().await? else { return Ok("💤 没有可撤销的整理".into()) };
         let before: BTreeMap<String, String> = serde_json::from_str(&rev.before)?;
         let after: BTreeMap<String, String> = serde_json::from_str(&rev.after)?;
         for (name, text) in &after {
             let current = std::fs::read_to_string(self.memory_path(name)).unwrap_or_default();
             if consolidate::entries(&current) != consolidate::entries(text) {
-                return Ok("记忆在那次整理之后又被改过，为免覆盖新的改动，没有撤销；可用 /learn list 记忆 查看后按编号删除".into());
+                return Ok(card::warn("记忆在那次整理之后又被改过，为免覆盖新的改动，没有撤销；可用 /learn list 记忆 查看后按编号删除"));
             }
         }
         for (name, text) in &before {
@@ -332,7 +334,7 @@ impl Runtime {
         }
         self.store.delete_memory_revision(rev.id).await?;
         let changes: Vec<String> = rev.summary.lines().map(str::to_owned).collect();
-        Ok(format!("已撤销 {} 的整理（{}），新会话生效", when(rev.created_at), tally(&changes)))
+        Ok(format!("{}\n新会话生效", card::ok(format!("已撤销 {} 的整理（{}）", when(rev.created_at), tally(&changes)))))
     }
 }
 

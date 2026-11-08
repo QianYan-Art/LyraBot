@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use qya_agent::{Kernel, KernelConfig, Queues, Tool, ToolRegistry, TurnOutcome, TurnSpec};
 use qya_command::{AgentAction, Command, LearnCmd, ParseError};
 use qya_config::{Config, ConfigHandle, ModelInfo};
+use qya_core::card::{self, Card};
 use qya_core::{AgentEvent, Effort, Message, Role, SessionId, StopReason, Usage};
 use qya_persona::Persona;
 use qya_persona::learner::{self, Index};
@@ -366,11 +367,11 @@ impl Runtime {
         }
         match qya_command::parse(&text) {
             Some(Ok(cmd)) => {
-                let reply = self.command(cmd).await.unwrap_or_else(|e| format!("命令失败：{e:#}"));
+                let reply = self.command(cmd).await.unwrap_or_else(|e| card::warn(format!("命令失败：{e:#}")));
                 let _ = self.platform().send(Outbound::text(reply)).await;
             }
             Some(Err(ParseError::BadArgs(n))) => {
-                let _ = self.platform().send(Outbound::text(format!("参数不对：{}", qya_command::help(Some(&n))))).await;
+                let _ = self.platform().send(Outbound::text(format!("{}\n\n{}", card::warn("参数不对"), qya_command::help(Some(&n))))).await;
             }
             None => self.on_chat(Message::with_parts(Role::User, msg.parts), true),
         }
@@ -448,17 +449,14 @@ impl Runtime {
         let r = self.store.gc_sessions(days, keep).await?;
         self.sup.forget(&r.deleted_ids);
         let mb = |b: i64| b as f64 / 1048576.0;
-        let mut s = format!(
-            "已清理结束超过 {days} 天的会话 {} 个、记录 {} 条\n数据库 {:.2} MB → {:.2} MB",
-            r.sessions,
-            r.entries,
-            mb(r.bytes_before),
-            mb(r.bytes_after)
-        );
+        let mut c = Card::new("🧹", "清理完成");
+        c.line(format!("结束超过 {days} 天的会话"))
+            .item(format!("删除会话 {} 个、记录 {} 条", r.sessions, r.entries))
+            .item(format!("数据库 {:.2} → {:.2} MB", mb(r.bytes_before), mb(r.bytes_after)));
         if r.kept_referenced > 0 {
-            s.push_str(&format!("\n另有 {} 个仍被较新的会话引用，暂时保留", r.kept_referenced));
+            c.item(format!("{} 个仍被较新的会话引用，暂时保留", r.kept_referenced));
         }
-        Ok(s)
+        Ok(c.build())
     }
 
     async fn sessions_report(&self) -> Result<String> {
@@ -469,10 +467,12 @@ impl Runtime {
         let fmt = |ms: i64| {
             jiff::Timestamp::from_millisecond(ms).map(|t| t.to_zoned(tz.clone()).strftime("%m-%d %H:%M").to_string()).unwrap_or_default()
         };
-        let mut s = String::from("【唐语歌的会话】最近 10 个\n");
+        let mut c = Card::new("🗂", "会话与数据库");
+        c.section("唐语歌最近的会话");
         for x in &list {
-            let mark = if x.id == cur { "▶ 当前" } else if x.status == "closed" { "已结束" } else { "历史" };
-            s.push_str(&format!("#{} {mark}\n  {} 条消息，最后 {}\n", x.id, x.messages, fmt(x.updated_at)));
+            let mark = if x.id == cur { "▶" } else { "·" };
+            let state = if x.id == cur { "当前" } else if x.status == "closed" { "已结束" } else { "历史" };
+            c.line(format!("{mark} #{} {state}｜{} 条｜{}", x.id, x.messages, fmt(x.updated_at)));
         }
         let label = |k: &str, st: &str| match (k, st) {
             ("persona", "active") => "唐语歌进行中",
@@ -482,17 +482,14 @@ impl Runtime {
             ("specialist", _) => "常驻专员",
             _ => "其他",
         };
-        s.push_str("\n【合计】\n");
+        c.section("合计");
         for (k, st, n) in &stats.sessions {
-            s.push_str(&format!("{} {n} 个\n", label(k, st)));
+            c.item(format!("{} {n} 个", label(k, st)));
         }
-        s.push_str(&format!(
-            "记录 {} 条，数据库 {:.2} MB\n\n每周自动检查一次，删除结束超过 {} 天的会话",
-            stats.entries,
-            stats.bytes as f64 / 1048576.0,
-            self.cfg.get().agent.gc_days
-        ));
-        Ok(s)
+        c.item(format!("记录 {} 条，数据库 {:.2} MB", stats.entries, stats.bytes as f64 / 1048576.0))
+            .hint(format!("每周自动清理结束超过 {} 天的会话", self.cfg.get().agent.gc_days))
+            .hint("手动清理：/gc 天数");
+        Ok(c.build())
     }
 
     /// 媒体缓存清理：每小时删除媒体目录下超过 24 小时的文件（沿用 Hermes 的保留期）。
@@ -548,7 +545,13 @@ impl Runtime {
                 };
                 let now = jiff::Timestamp::now();
                 for job in qya_tools::cron::due(&jobs, now) {
-                    if let Err(e) = self.store.cron_mark_run(job.id, now.as_millisecond()).await {
+                    // 先记下（一次性任务直接删除）再触发：重启不会重复触发
+                    let recorded = if qya_tools::cron::is_once(&job) {
+                        self.store.cron_remove(job.id).await.map(|_| ())
+                    } else {
+                        self.store.cron_mark_run(job.id, now.as_millisecond()).await
+                    };
+                    if let Err(e) = recorded {
                         tracing::warn!(error = %e, id = job.id, "记录定时任务运行失败");
                         continue;
                     }
@@ -814,20 +817,20 @@ impl Runtime {
                 let id = self.new_persona_session().await?;
                 self.state().session = id;
                 self.store.update_session(old, None, None, Some(qya_store::SessionStatus::Closed)).await?;
-                format!("已开启新会话 #{id}\n记忆和关系不变；旧会话 #{old} 已结束，{} 天后可被清理", c.agent.gc_days)
+                format!("{}\n记忆和关系不变\n旧会话 #{old} 已结束，{} 天后可被清理", card::ok(format!("已开启新会话 #{id}")), c.agent.gc_days)
             }
             Command::Sessions => self.sessions_report().await?,
             Command::Gc(days) => self.gc(days.unwrap_or(c.agent.gc_days)).await?,
             Command::Stop => {
                 if self.stop_current() {
-                    "已停止".into()
+                    card::ok("已停止")
                 } else {
-                    "当前没有进行中的回复".into()
+                    "💤 当前没有进行中的回复".into()
                 }
             }
             Command::Compact => {
                 if self.state().phase != Phase::Idle {
-                    return Ok("正在回复中，稍后再压缩".into());
+                    return Ok(card::warn("正在回复中，稍后再压缩"));
                 }
                 let s = self.store.session(self.session()).await?;
                 let mut spec = self.persona_spec(&c, &s, "").await?;
@@ -835,48 +838,56 @@ impl Runtime {
                 let ctx = qya_agent::context::build(&self.store.branch(s.id).await?)?;
                 let est = qya_agent::context::estimate_messages(&ctx);
                 if self.kernel.compact(&spec, s.id, &ctx, est, &CancellationToken::new()).await? {
-                    format!("已压缩，压缩前约 {} token", tokens(est))
+                    card::ok(format!("已压缩，压缩前约 {} token", tokens(est)))
                 } else {
-                    "内容太少，无需压缩".into()
+                    "💤 内容太少，无需压缩".into()
                 }
             }
             Command::Model(None) => {
                 let s = self.store.session(self.session()).await?;
                 let p = c.provider(&c.persona.provider).context("persona provider 未配置")?;
-                let list: Vec<_> = p.models.keys().map(|m| format!("{} {m}", if *m == s.model { "▶" } else { "·" })).collect();
-                format!("当前模型：{}\n\n【可选】\n{}\n\n切换：/model 名称", s.model, list.join("\n"))
+                let mut out = Card::new("🧠", "模型");
+                out.line(format!("当前 {}", s.model)).section("可选");
+                for m in p.models.keys() {
+                    out.line(if *m == s.model { format!("▶ {m}") } else { format!("· {m}") });
+                }
+                out.hint("切换：/model 名称").build()
             }
             Command::Model(Some(m)) => {
                 model_info(&c, &m)?;
                 self.store.update_session(self.session(), Some(m.clone()), None, None).await?;
-                format!("唐语歌模型已切换为 {m}")
+                card::ok(format!("唐语歌的模型已切换为 {m}"))
             }
             Command::Effort(None) => {
                 let s = self.store.session(self.session()).await?;
-                format!("当前思考等级：{}\n可选：low / medium / high / xhigh / max", s.effort)
+                Card::new("💭", "思考等级")
+                    .line(format!("当前 {}", s.effort))
+                    .line("可选 low / medium / high / xhigh / max")
+                    .hint("切换：/effort 等级")
+                    .build()
             }
             Command::Effort(Some(e)) => {
                 let e: Effort = e.parse().map_err(anyhow::Error::msg)?;
                 self.store.update_session(self.session(), None, Some(e.to_string()), None).await?;
                 let p = c.provider(&c.persona.provider).context("persona provider 未配置")?;
-                format!("思考等级已切换为 {e}\n实际请求参数：{}", p.effort_param(e))
+                format!("{}\n实际请求参数：{}", card::ok(format!("思考等级已切换为 {e}")), p.effort_param(e))
             }
             Command::Learn(cmd) => self.learn_command(cmd).await?,
             Command::Agents => qya_orchestra::render_list(&self.sup.list().await),
             Command::Provider(None) => qya_plugins::provider_cmd::list(&self.cfg),
             Command::Provider(Some((cat, field, value))) => {
-                qya_plugins::provider_cmd::apply(&self.cfg, &cat, &field, &value).unwrap_or_else(|e| e)
+                qya_plugins::provider_cmd::apply(&self.cfg, &cat, &field, &value).map_or_else(card::warn, card::ok)
             }
             Command::Agent { id, action } => match action {
                 AgentAction::Show => self.agent_detail(id).await?,
-                AgentAction::Stop => self.sup.stop(id).unwrap_or_else(|e| e),
-                AgentAction::Say(t) => self.sup.continue_worker(id, &t, self.session()).await.unwrap_or_else(|e| e),
+                AgentAction::Stop => self.sup.stop(id).map_or_else(card::warn, card::ok),
+                AgentAction::Say(t) => self.sup.continue_worker(id, &t, self.session()).await.map_or_else(card::warn, card::ok),
             },
             Command::Reload => {
                 let c = self.cfg.reload()?;
                 let kit = PersonaKit::load(&c, &self.sup, &self.memory_lock)?;
                 *self.kit.lock().expect("kit 锁中毒") = Arc::new(kit);
-                "配置与人格资产已重新加载\n记忆快照在新会话或压缩后生效".into()
+                format!("{}\n记忆快照在新会话或压缩后生效", card::ok("配置与人格资产已重新加载"))
             }
         })
     }
@@ -921,22 +932,22 @@ impl Runtime {
             Phase::Tools => "调用工具中",
             Phase::Delivering => "发送中",
         };
-        Ok(format!(
-            "【状态】qya {}\n会话 #{}，{phase}\n模型 {}，思考 {}\n\n【上下文】\n约 {} / {}（{:.0}%）\n\n【用量】\n上一轮：输入 {}，命中 {:.0}%，输出 {}\n累计：输入 {}，命中 {:.0}%\n\n【运行】\n待合并 {pending} 条，后台进行中 {workers} 个\n内存 {rss} MB，已运行 {}",
-            crate::VERSION,
-            s.id,
-            s.model,
-            s.effort,
-            tokens(est),
-            tokens(info.context_length),
-            est as f64 * 100.0 / info.context_length as f64,
-            tokens(last.prompt_tokens),
-            hit(&last),
-            tokens(last.completion_tokens),
-            tokens(total.prompt_tokens),
-            hit(&total),
-            duration(up)
-        ))
+        Ok(Card::new("📊", "运行状态")
+            .line(format!("qya {}", crate::VERSION))
+            .section("会话")
+            .item(format!("#{}｜{phase}", s.id))
+            .item(format!("{}｜思考 {}", s.model, s.effort))
+            .section("上下文")
+            .line(card::bar(est as f64 / info.context_length.max(1) as f64))
+            .line(format!("约 {} / {} token", tokens(est), tokens(info.context_length)))
+            .section("用量")
+            .item(format!("上一轮 输入 {}，输出 {}", tokens(last.prompt_tokens), tokens(last.completion_tokens)))
+            .item(format!("缓存命中 {:.0}%（累计 {:.0}%）", hit(&last), hit(&total)))
+            .item(format!("累计输入 {}", tokens(total.prompt_tokens)))
+            .section("运行")
+            .item(format!("待合并 {pending} 条，后台 {workers} 个"))
+            .item(format!("内存 {rss} MB，已运行 {}", duration(up)))
+            .build())
     }
 
     /// `--check`：配置、数据库、人格资产、模型连通性自检（不连接聊天平台）。
@@ -987,9 +998,10 @@ impl Runtime {
         }
         let info = self.sup.list().await.into_iter().find(|w| w.id == id);
         let status = info.as_ref().map(|w| w.status.label()).unwrap_or("已归档");
-        let mut s = format!("#{id} {status}\n{}\n模型 {}，思考 {}", row.name.unwrap_or_default(), row.model, row.effort);
+        let mut c = Card::new("🤖", &format!("后台 #{id}｜{status}"));
+        c.line(row.name.unwrap_or_default()).item(format!("{}｜思考 {}", row.model, row.effort));
         if let Some(p) = info.and_then(|w| w.progress) {
-            s.push_str(&format!("\n进度：{p}"));
+            c.item(format!("进度：{p}"));
         }
         let msgs = self.store.messages_since(id, 0, 50).await?;
         let last = msgs
@@ -999,9 +1011,10 @@ impl Runtime {
             .find(|m| m.role == Role::Assistant && !m.text().trim().is_empty());
         if let Some(m) = last {
             let t: String = m.text().chars().take(800).collect();
-            s.push_str(&format!("\n\n【最近回复】\n{t}"));
+            c.section("最近回复").line(t);
         }
-        Ok(s)
+        c.hint(format!("续接：/agent {id} 话"));
+        Ok(c.build())
     }
 }
 

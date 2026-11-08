@@ -1,5 +1,6 @@
 //! cron：定时任务（5 段 cron 表达式，按北京时间解释）。
 //! 触发动作由运行时执行：remind → 交给唐语歌提醒阿颜；task → 派给后台执行者。
+//! 动作带 `once: true` 的任务触发一次后由运行时删除（具体某天的提醒）。
 
 use crate::util::{arg_str, now_ms};
 use async_trait::async_trait;
@@ -46,6 +47,11 @@ fn fmt_ts(t: Timestamp) -> String {
     t.to_zoned(tz()).strftime("%m-%d %H:%M").to_string()
 }
 
+/// 是否只触发一次。
+pub fn is_once(job: &CronJob) -> bool {
+    job.action["once"].as_bool().unwrap_or(false)
+}
+
 pub fn render(jobs: &[CronJob]) -> String {
     if jobs.is_empty() {
         return "没有定时任务".into();
@@ -58,7 +64,8 @@ pub fn render(jobs: &[CronJob]) -> String {
                 _ => format!("提醒：{}", j.action["text"].as_str().unwrap_or("")),
             };
             let next = if j.enabled { next_after(&j.schedule, now).map(fmt_ts).unwrap_or("-".into()) } else { "已暂停".into() };
-            format!("#{} {} [{}] 下次 {} · {what}", j.id, j.name, j.schedule, next)
+            let repeat = if is_once(j) { "仅一次" } else { j.schedule.as_str() };
+            format!("#{} {} [{repeat}] 下次 {next} · {what}", j.id, j.name)
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -76,7 +83,7 @@ impl CronTool {
         let spec = ToolSpec {
             name: "cron".into(),
             description: "管理定时任务（时间按北京时间）。schedule 是 5 段 cron：分 时 日 月 周，例如每天 9 点“0 9 * * *”、工作日 18:30“30 18 * * 1-5”。\
-                          kind=remind 到点由你提醒阿颜 text 的内容；kind=task 到点把 task 派给后台（to 选执行者或专员），结果再交回给你。\
+                          kind=remind 到点由你提醒阿颜 text 的内容；kind=task 到点把 task 派给后台（to 选执行者或专员），结果再交回给你。                          只在某一天发生的事（“明天 9 点”“11 月 10 日”）要设 once=true，触发一次后自动删除；不设就是每年、每月或每天重复。\
                           add 前先和阿颜确认时间与内容。".into(),
             parameters: json!({
                 "type": "object",
@@ -88,7 +95,8 @@ impl CronTool {
                     "kind": {"type": "string", "enum": ["remind", "task"]},
                     "text": {"type": "string", "description": "remind 的提醒内容"},
                     "task": {"type": "string", "description": "task 的任务说明"},
-                    "to": {"type": "string", "enum": to}
+                    "to": {"type": "string", "enum": to},
+                    "once": {"type": "boolean", "description": "只触发一次，触发后自动删除"}
                 },
                 "required": ["action"],
                 "additionalProperties": false
@@ -112,13 +120,18 @@ impl Tool for CronTool {
                     let schedule = arg_str(&args, "schedule").ok_or("add 需要 schedule")?.trim();
                     parse(schedule)?;
                     let name = arg_str(&args, "name").unwrap_or("定时任务");
-                    let action = match arg_str(&args, "kind") {
+                    let once = args.get("once").and_then(Value::as_bool).unwrap_or(false);
+                    let mut action = match arg_str(&args, "kind") {
                         Some("task") => json!({"kind": "task", "task": arg_str(&args, "task").ok_or("task 类型需要 task")?, "to": arg_str(&args, "to").unwrap_or("worker")}),
                         _ => json!({"kind": "remind", "text": arg_str(&args, "text").ok_or("remind 类型需要 text")?}),
                     };
+                    if once {
+                        action["once"] = json!(true);
+                    }
                     let id = self.store.cron_add(name, schedule, action).await.map_err(|e| e.to_string())?;
                     let next = next_after(schedule, Timestamp::now()).map(fmt_ts).unwrap_or("-".into());
-                    Ok(format!("已添加 #{id}，下次触发 {next}"))
+                    let repeat = if once { "，只触发这一次" } else { "，之后按规则重复" };
+                    Ok(format!("已添加 #{id}，下次触发 {next}{repeat}"))
                 }
                 Some("remove") => {
                     let id = id.ok_or("remove 需要 id")?;
@@ -166,5 +179,13 @@ mod tests {
         let mut paused = job("* * * * *", last);
         paused.enabled = false;
         assert!(due(&[paused], "2026-11-08T00:00:00Z".parse().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn once_flag_rendered() {
+        let mut j = job("0 9 10 11 *", 0);
+        assert!(!is_once(&j) && render(std::slice::from_ref(&j)).contains("[0 9 10 11 *]"));
+        j.action["once"] = json!(true);
+        assert!(is_once(&j) && render(&[j]).contains("[仅一次]"));
     }
 }

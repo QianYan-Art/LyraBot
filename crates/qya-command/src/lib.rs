@@ -1,6 +1,8 @@
 //! 聊天命令解析。命令不经过模型，立即响应；帮助文本与解析共用一张表，保证一致。
 //! 完整命令设计见 docs/01-architecture.md 第 11 节，后续阶段逐步补齐。
 
+use qya_core::card::Card;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help(Option<String>),
@@ -169,15 +171,14 @@ pub fn help(topic: Option<&str>) -> String {
         Some(t) => COMMANDS
             .iter()
             .find(|(n, _, _, _)| *n == t)
-            .map(|(_, u, _, d)| format!("{u}\n{d}"))
-            .unwrap_or_else(|| format!("没有 /{t} 这个命令，发 /help 看全部")),
+            .map(|(_, u, _, d)| Card::new("📖", u).line(d).build())
+            .unwrap_or_else(|| qya_core::card::warn(format!("没有 /{t} 这个命令，发 /help 看全部"))),
         None => {
-            let mut s = String::from("【命令】\n");
+            let mut c = Card::new("📖", "命令");
             for (n, _, short, _) in COMMANDS {
-                s.push_str(&format!("/{n}  {short}\n"));
+                c.line(format!("/{n}　{short}"));
             }
-            s.push_str("\n发 /help 命令名 查看详细用法");
-            s
+            c.hint("详细用法：/help 命令名").build()
         }
     }
 }

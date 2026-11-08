@@ -4,6 +4,7 @@ use crate::supervisor::{ContextMode, DelegateRequest, Handle, Notify, Supervisor
 use async_trait::async_trait;
 use qya_agent::{Concurrency, Tool, ToolCtx, ToolOutput};
 use qya_config::Config;
+use qya_core::card::Card;
 use qya_core::{Effort, ToolSpec};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -122,25 +123,24 @@ impl AgentCtlTool {
 /// /agents 与 agent_ctl(status) 共用的列表渲染。
 pub fn render_list(list: &[crate::WorkerInfo]) -> String {
     if list.is_empty() {
-        return "目前没有后台任务".into();
+        return "🤖 目前没有后台任务".into();
     }
-    let mut out = Vec::new();
+    let mut c = Card::new("🤖", "后台任务");
     for w in list.iter().take(12) {
         let who = match &w.kind {
             WorkerKind::Worker => format!("任务：{}", w.title),
             WorkerKind::Specialist(n) => format!("专员 {n}"),
         };
-        let mut item = format!("#{} {}", w.id, w.status.label());
+        let mut head = format!("#{}｜{}", w.id, w.status.label());
         if let Some(e) = w.elapsed {
-            item.push_str(&format!("，{} 秒", e.as_secs()));
+            head.push_str(&format!("｜{} 秒", e.as_secs()));
         }
-        item.push_str(&format!("\n{who}\n模型 {}，思考 {}", w.model, w.effort));
+        c.section(head).item(who).item(format!("{}｜思考 {}", w.model, w.effort));
         if let Some(p) = &w.progress {
-            item.push_str(&format!("\n进度：{p}"));
+            c.item(format!("进度：{p}"));
         }
-        out.push(item);
     }
-    format!("【后台任务】\n{}", out.join("\n\n"))
+    c.build()
 }
 
 #[async_trait]
