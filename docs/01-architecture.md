@@ -217,7 +217,7 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料
 - 触发：每累计 30 条阿颜消息或空闲 10 分钟，后台任务用低价模型（默认 `kimi-for-coding`，effort=low）批量分析新增对话。
 - 产出：`expressions(situation, text, kind[habit|jargon], meaning, hits, last_used, weight)`，存 SQLite；按时间衰减，上限 300 条，超出淘汰低权重条目。
 - 注入：每轮本地检索——对最近 3 条消息用 aho-corasick 匹配触发词，再用字符二元组 Jaccard 打分，取 top-3，渲染为 ≤150 token 的尾注入。不额外调用模型。
-- 隔离：学习结果只影响说法和用词，不写入身份段，不覆盖角色卡；`/learn off` 可整体关闭；`/learn list|forget <id>` 可人工管理。
+- 隔离：学习结果只影响说法和用词，不写入身份段，不覆盖角色卡；`/learn off` 可整体关闭；`/learn list 说法|记忆`、`/learn forget <编号>` 可人工管理。
 
 **实现（任务 08，2026-11-07）**
 
@@ -468,7 +468,7 @@ pub trait Platform: Send + Sync {
 | `/compact` | 立即压缩当前会话（先折叠，不够再摘要） |
 | `/model [名称]` | 查看/切换唐语歌模型（校验当前 key 可用） |
 | `/effort [等级]` | 查看/切换唐语歌思考等级 |
-| `/learn` | 学习与记忆总览；`list 说法\|记忆`、`forget 编号\|u3\|m2`、`now`、`undo`、`on\|off` |
+| `/learn` | 学习与记忆总览；`list 说法` / `list 记忆`（必须写明，不带对象视为参数错误）、`forget 编号\|u3\|m2`、`now`、`undo`、`on\|off` |
 | `/agents` | 列出 worker 与专员：编号、状态、模型、耗时、进度 |
 | `/agent <id> [消息]` | 查看某个 worker 详情；带消息则续接/插话 |
 | `/agent <id> stop` | 停止某个 worker |

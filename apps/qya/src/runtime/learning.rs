@@ -291,7 +291,7 @@ impl Runtime {
                 c.section("最近一次整理").line("还没有整理过");
             }
         }
-        c.hint("查看：/learn list 说法 或 记忆").hint("撤销最近一次整理：/learn undo");
+        c.hint("看说法：/learn list 说法").hint("看记忆：/learn list 记忆").hint("撤销最近一次整理：/learn undo");
         Ok(c.build())
     }
 

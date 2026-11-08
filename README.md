@@ -98,7 +98,7 @@ cargo test --workspace
 | `/model [名]` · `/effort [等级]` | 切换唐语歌的模型与思考等级 |
 | `/agents` · `/agent <编号> [stop/话]` | 查看、停止、续接后台任务 |
 | `/provider [类别 字段 值]` | 查看或修改生图、语音、搜索、grok 提供方 |
-| `/learn [list/forget/now/undo/on/off]` | 学习与记忆：总览、查看说法或记忆、删除、立即整理、撤销 |
+| `/learn [list 说法/记忆 · forget · now · undo · on/off]` | 学习与记忆：总览、查看说法或记忆、删除、立即整理、撤销 |
 | `/reload` | 重载配置与人格资产 |
 
 ## 安全说明

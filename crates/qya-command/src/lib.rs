@@ -65,7 +65,7 @@ pub const COMMANDS: &[(&str, &str, &str, &str)] = &[
     ("compact", "/compact", "压缩当前会话", "立即压缩当前会话：先折叠较早的工具结果，不够再生成摘要。"),
     ("model", "/model [名称]", "查看或切换模型", "不带参数查看当前模型与可选模型；带名称切换唐语歌的模型。"),
     ("effort", "/effort [等级]", "查看或切换思考等级", "等级可选 low / medium / high / xhigh / max。"),
-    ("learn", "/learn [子命令]", "学习与记忆", "/learn　查看总览\n/learn list 说法 或 /learn list 记忆\n/learn forget 12（说法编号）或 u3 / m2（记忆编号）\n/learn now 立即学习并整理\n/learn undo 撤销最近一次整理\n/learn on 或 off 开关学习"),
+    ("learn", "/learn [子命令]", "学习与记忆", "/learn　查看总览\n/learn list 说法　学到的口头禅\n/learn list 记忆　长期记忆\n/learn forget 12（说法编号）或 u3 / m2（记忆编号）\n/learn now 立即学习并整理\n/learn undo 撤销最近一次整理\n/learn on 或 off 开关学习"),
     ("agents", "/agents", "后台任务列表", "列出后台任务与常驻专员：编号、状态、模型、耗时、进度。"),
     ("agent", "/agent <编号> [stop|话]", "查看、停止或续接", "/agent 12 查看详情与最近回复\n/agent 12 stop 停止\n/agent 12 再查一下日志：运行中则插话，已结束则续接"),
     ("provider", "/provider [类别 字段 值]", "生图、语音、搜索、grok", "不带参数查看当前提供方。\n修改：/provider image model gpt-image-2\n切换：/provider image use 名字"),
@@ -145,9 +145,10 @@ fn parse_learn(arg: Option<&str>) -> Option<LearnCmd> {
     let mut it = arg.split_whitespace();
     Some(match it.next()? {
         "list" => match it.next() {
-            None | Some("说法" | "表达" | "expr") => LearnCmd::List(LearnScope::Expressions),
+            // 必须写明看哪一类，避免以为记忆没显示
+            Some("说法" | "表达" | "expr") => LearnCmd::List(LearnScope::Expressions),
             Some("记忆" | "memory" | "mem") => LearnCmd::List(LearnScope::Memory),
-            Some(_) => return None,
+            _ => return None,
         },
         "on" => LearnCmd::On,
         "off" => LearnCmd::Off,
@@ -208,7 +209,8 @@ mod tests {
         assert_eq!(parse("/gc"), Some(Ok(Command::Gc(None))));
         assert_eq!(parse("/gc x"), Some(Err(ParseError::BadArgs("gc".into()))));
         assert_eq!(parse("/learn"), Some(Ok(Command::Learn(LearnCmd::Overview))));
-        assert_eq!(parse("/learn list"), Some(Ok(Command::Learn(LearnCmd::List(LearnScope::Expressions)))));
+        assert_eq!(parse("/learn list 说法"), Some(Ok(Command::Learn(LearnCmd::List(LearnScope::Expressions)))));
+        assert_eq!(parse("/learn list"), Some(Err(ParseError::BadArgs("learn".into()))), "必须写明说法或记忆");
         assert_eq!(parse("/learn list 记忆"), Some(Ok(Command::Learn(LearnCmd::List(LearnScope::Memory)))));
         assert_eq!(parse("/learn list 别的"), Some(Err(ParseError::BadArgs("learn".into()))));
         assert_eq!(parse("/learn forget 12"), Some(Ok(Command::Learn(LearnCmd::Forget("12".into())))));
