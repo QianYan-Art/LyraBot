@@ -6,6 +6,7 @@
 //! - 尾注入：时间等每轮变化的内容，附在最后一条用户消息后，不落库。
 
 mod assets;
+pub mod consolidate;
 pub mod learner;
 mod notes_tool;
 pub mod pacer;

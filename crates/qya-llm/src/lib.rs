@@ -5,6 +5,7 @@
 
 mod chat_completions;
 mod error;
+pub mod media;
 
 pub use chat_completions::ChatCompletionsProvider;
 pub use error::{ErrorKind, LlmError};

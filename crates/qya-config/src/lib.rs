@@ -197,6 +197,8 @@ pub struct ToolsConfig {
     pub blog_script: Option<PathBuf>,
     pub blog_timeout_s: u64,
     pub mail: Option<MailSettings>,
+    /// watch_video 使用的模型（须在唐语歌提供方的模型目录中且支持视频）
+    pub video_model: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -238,6 +240,7 @@ struct RawTools {
     blog_script: Option<PathBuf>,
     blog_timeout_s: Option<u64>,
     mail: Option<RawMail>,
+    video_model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -504,7 +507,7 @@ struct RawPersona {
 }
 
 fn d_persona_tools() -> Vec<String> {
-    ["image_generate", "speak", "web_search", "cron", "skill_view"].map(str::to_owned).to_vec()
+    ["image_generate", "speak", "web_search", "cron", "skill_view", "recall"].map(str::to_owned).to_vec()
 }
 
 impl Config {
@@ -579,6 +582,7 @@ impl Config {
             blog_script: rt.blog_script.as_deref().map(resolve),
             blog_timeout_s: rt.blog_timeout_s.unwrap_or(1300),
             mail: rt.mail.map(|m| MailSettings { python: m.python, helper: resolve(&m.helper), config: resolve(&m.config) }),
+            video_model: rt.video_model.unwrap_or_else(|| "kimi-for-coding".into()),
         };
         for (name, cat) in &raw.plugins.categories {
             if !cat.providers.contains_key(&cat.active) {

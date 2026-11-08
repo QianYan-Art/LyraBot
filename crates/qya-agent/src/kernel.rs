@@ -2,7 +2,7 @@
 //!
 //! 内核不知道唐语歌，也不知道平台；人格、编排都通过 [`TurnSpec`] 注入提示词与工具。
 
-use crate::context::{self, Compaction, CtxMessage};
+use crate::context::{self, Compaction, CtxMessage, FOLDED_TOOL, Fold};
 use crate::tool::{Concurrency, ToolCtx, ToolOutput, Toolset};
 use futures_util::future::join_all;
 use qya_core::{AgentEvent, ContentPart, Effort, Message, Role, SessionId, StopReason, ToolCall, Usage};
@@ -343,7 +343,8 @@ impl Kernel {
         out
     }
 
-    /// 压缩：摘要切分点之前的上下文，写入 compaction 条目。返回是否发生了压缩。
+    /// 压缩：先把切分点之前的工具结果折叠成占位（不调模型），若已降到窗口的 [`FOLD_TARGET`] 以下就到此为止；
+    /// 否则对切分点之前的上下文做枚举式摘要 + 任务胶囊，写入 compaction 条目。返回是否发生了压缩。
     pub async fn compact(
         &self,
         spec: &TurnSpec,
@@ -356,6 +357,20 @@ impl Kernel {
             return Ok(false);
         };
         let first_kept = ctx[split].entry;
+        if let Some(before) = first_kept {
+            let stub = context::estimate_tokens(FOLDED_TOOL.chars().count());
+            let saved: u64 = ctx[..split]
+                .iter()
+                .filter(|m| m.message.role == Role::Tool && m.message.text() != FOLDED_TOOL)
+                .map(|m| context::estimate_tokens(m.message.char_len()).saturating_sub(stub))
+                .sum();
+            if saved > 0 && (tokens_before.saturating_sub(saved) as f64) < spec.context_window as f64 * FOLD_TARGET {
+                self.store.append(session, EntryKind::Fold, serde_json::to_value(Fold { before })?, 0).await?;
+                self.emit(AgentEvent::Compacted { session, before_tokens: tokens_before });
+                tracing::info!(session, tokens_before, saved, "已折叠较早的工具结果");
+                return Ok(true);
+            }
+        }
         let mut transcript = String::new();
         for m in &ctx[..split] {
             let who = match m.message.role {
@@ -375,10 +390,10 @@ impl Kernel {
             messages: vec![Message::user(transcript)],
             tools: Vec::new(),
             effort: Some(Effort::Low),
-            max_tokens: Some(4000),
+            max_tokens: Some(6000),
         };
         let c = spec.provider.complete(req, cancel.clone()).await?;
-        let summary = c.message.text();
+        let summary = context::render_compaction(&c.message.text());
         if summary.trim().is_empty() {
             tracing::warn!(session, "压缩摘要为空，跳过");
             return Ok(false);
@@ -391,9 +406,16 @@ impl Kernel {
     }
 }
 
-const COMPACT_PROMPT: &str = "你负责压缩对话历史。用中文写一份紧凑摘要，供同一个助手继续对话：\
-保留未完成的任务与进度、用户明确的偏好与要求、做出的承诺、关键事实（路径、名称、数字）。\
-不要编造，不要写客套话，不超过 1500 字。";
+/// 折叠后需降到窗口的这一比例以下才视为够用，否则直接做摘要（避免刚折叠又触发压缩）。
+const FOLD_TARGET: f64 = 0.6;
+
+const COMPACT_PROMPT: &str = "你负责压缩对话历史，供同一个助手继续对话。\
+先在心里逐条清点：日期与截止时间、数字与金额、人名与账号、已确认的决定、用户纠正过的地方——这些必须全部写进结果，不许合并丢弃。\
+只输出一个 JSON 对象，不要代码块或解释：\
+{\"summary\": \"分点摘要，保留未完成的任务与进度、用户的偏好与要求、做出的承诺和上面清点的关键事实，不超过 800 字\", \
+\"capsule\": {\"objective\": \"当前进行中的任务目标\", \"constraints\": [\"用户明确提出的要求或禁忌\"], \"decisions\": [\"已确认的决定\"], \
+\"verification\": [\"已验证或未验证的事项及结论\"], \"next_steps\": [\"接下来要做的事\"]}}。\
+没有进行中的任务时 capsule 为 null；某项没有内容就给空数组。不要编造，不要写客套话。";
 
 fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {

@@ -79,6 +79,8 @@ pub struct ExecOutput {
     pub code: Option<i32>,
     pub timed_out: bool,
     pub cancelled: bool,
+    /// 输出超过捕获上限，超出部分已丢弃
+    pub truncated: bool,
     pub elapsed: Duration,
 }
 
@@ -132,7 +134,7 @@ pub async fn exec(
     group.0 = None;
     // 进程结束后管道会关闭；给读取留一点时间，避免孙进程持有管道导致挂起
     let abort = reader.abort_handle();
-    let (o, e) = match tokio::time::timeout(Duration::from_secs(3), reader).await {
+    let ((o, o_cut), (e, e_cut)) = match tokio::time::timeout(Duration::from_secs(3), reader).await {
         Ok(Ok(r)) => r,
         _ => {
             abort.abort();
@@ -148,25 +150,28 @@ pub async fn exec(
         output.push_str("[stderr]\n");
         output.push_str(&err);
     }
-    Ok(ExecOutput { output, code: status.and_then(|s| s.code()), timed_out, cancelled, elapsed: started.elapsed() })
+    Ok(ExecOutput { output, code: status.and_then(|s| s.code()), timed_out, cancelled, truncated: o_cut || e_cut, elapsed: started.elapsed() })
 }
 
 /// 单路输出最多保留的字节数；超出部分继续读走丢弃，保证子进程不会因管道写满阻塞。
 const MAX_CAPTURE: usize = 4 * 1024 * 1024;
 
-async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R, cap: usize) -> Vec<u8> {
+/// 读完整个管道，最多保留 `cap` 字节；返回内容与是否有超出部分被丢弃。
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R, cap: usize) -> (Vec<u8>, bool) {
     let mut out = Vec::new();
+    let mut dropped = false;
     let mut buf = [0u8; 8192];
     loop {
         match r.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 let room = cap.saturating_sub(out.len());
+                dropped |= n > room;
                 out.extend_from_slice(&buf[..n.min(room)]);
             }
         }
     }
-    out
+    (out, dropped)
 }
 
 /// 未解除时在析构中发出进程组终止（不等待结果）。

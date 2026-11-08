@@ -7,6 +7,7 @@ use qya_agent::{Tool, ToolCtx, ToolOutput};
 use qya_core::ToolSpec;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub const FILE_LIMIT: usize = 2000;
@@ -22,8 +23,8 @@ pub struct MemoryTarget {
 pub struct Memory {
     spec: ToolSpec,
     targets: Vec<MemoryTarget>,
-    /// 串行化同一实例内的读改写
-    lock: Mutex<()>,
+    /// 串行化读改写；可与后台整理等其他写入方共享（见 [`Memory::with_lock`]）
+    lock: Arc<Mutex<()>>,
 }
 
 impl Memory {
@@ -49,7 +50,13 @@ impl Memory {
                 "additionalProperties": false
             }),
         };
-        Self { spec, targets, lock: Mutex::new(()) }
+        Self { spec, targets, lock: Arc::new(Mutex::new(())) }
+    }
+
+    /// 与其他写同一批文件的地方共用一把锁。
+    pub fn with_lock(mut self, lock: Arc<Mutex<()>>) -> Self {
+        self.lock = lock;
+        self
     }
 }
 

@@ -1353,6 +1353,7 @@ dependencies = [
  "qya-agent",
  "qya-config",
  "qya-core",
+ "qya-llm",
  "reqwest",
  "rustls",
  "serde",

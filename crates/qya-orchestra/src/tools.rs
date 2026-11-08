@@ -127,26 +127,20 @@ pub fn render_list(list: &[crate::WorkerInfo]) -> String {
     let mut out = Vec::new();
     for w in list.iter().take(12) {
         let who = match &w.kind {
-            WorkerKind::Worker => "任务".to_owned(),
+            WorkerKind::Worker => format!("任务：{}", w.title),
             WorkerKind::Specialist(n) => format!("专员 {n}"),
         };
-        let mut line = format!(
-            "#{} [{who}] {} · {} · {}/{}",
-            w.id,
-            w.title,
-            w.status.label(),
-            w.model,
-            w.effort
-        );
+        let mut item = format!("#{} {}", w.id, w.status.label());
         if let Some(e) = w.elapsed {
-            line.push_str(&format!(" · {}s", e.as_secs()));
+            item.push_str(&format!("，{} 秒", e.as_secs()));
         }
+        item.push_str(&format!("\n{who}\n模型 {}，思考 {}", w.model, w.effort));
         if let Some(p) = &w.progress {
-            line.push_str(&format!("\n  进度：{p}"));
+            item.push_str(&format!("\n进度：{p}"));
         }
-        out.push(line);
+        out.push(item);
     }
-    out.join("\n")
+    format!("【后台任务】\n{}", out.join("\n\n"))
 }
 
 #[async_trait]

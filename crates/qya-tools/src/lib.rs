@@ -10,6 +10,7 @@ mod fs;
 mod komari;
 mod mail;
 pub mod memory;
+mod recall;
 mod shell;
 mod skills;
 mod todo;
@@ -22,6 +23,7 @@ pub use komari::KomariReport;
 pub use mail::Mail;
 pub use memory::{Memory, MemoryTarget};
 pub use shell::Shell;
+pub use recall::Recall;
 pub use skills::SkillView;
 pub use todo::Todo;
 
@@ -35,7 +37,8 @@ use util::Audit;
 pub fn register_builtin(reg: &mut ToolRegistry, c: &Config, store: &Store) -> Vec<String> {
     let t = &c.tools;
     let audit = Audit::new(t.audit_log.clone());
-    reg.register(Arc::new(Shell::new(t.shell.clone(), audit.clone())));
+    // 长输出存进媒体目录下的 tool-output，随每日媒体清理回收
+    reg.register(Arc::new(Shell::new(t.shell.clone(), audit.clone()).with_spill(t.media_dir.join("tool-output"))));
     reg.register(Arc::new(FsRead::default()));
     reg.register(Arc::new(FsWrite::default()));
     reg.register(Arc::new(FsPatch::default()));
@@ -43,6 +46,7 @@ pub fn register_builtin(reg: &mut ToolRegistry, c: &Config, store: &Store) -> Ve
     reg.register(Arc::new(Todo::default()));
     let specialists: Vec<String> = c.orchestra.specialists.keys().cloned().collect();
     reg.register(Arc::new(CronTool::new(store.clone(), &specialists)));
+    reg.register(Arc::new(Recall::new(store.clone())));
     if let Some(s) = SkillView::new(&t.skills_dir) {
         reg.register(Arc::new(s));
     }

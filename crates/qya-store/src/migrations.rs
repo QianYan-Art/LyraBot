@@ -99,6 +99,24 @@ CREATE TABLE run_queue (                    -- 交给运行中执行者、尚未
 );
 CREATE INDEX idx_run_queue_worker ON run_queue(worker, id);
 "#,
+    // v4：记忆整理（候选与修订）、过往对话检索索引（FTS5 trigram，中文 3 字以上片段可直接匹配）
+    r#"
+CREATE TABLE memory_candidates (
+    id         INTEGER PRIMARY KEY,
+    target     TEXT NOT NULL,                -- user / memory
+    text       TEXT NOT NULL,
+    basis      TEXT NOT NULL DEFAULT 'stated', -- stated / agreed / corrected
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE memory_revisions (
+    id         INTEGER PRIMARY KEY,
+    summary    TEXT NOT NULL,                -- 变更说明
+    before     TEXT NOT NULL,                -- JSON：目标 → 整理前全文
+    after      TEXT NOT NULL,                -- JSON：目标 → 整理后全文
+    created_at INTEGER NOT NULL
+);
+CREATE VIRTUAL TABLE recall_fts USING fts5(text, session UNINDEXED, entry UNINDEXED, role UNINDEXED, at UNINDEXED, tokenize='trigram');
+"#,
 ];
 
 pub fn run(conn: &mut Connection) -> rusqlite::Result<()> {

@@ -13,7 +13,7 @@ pub fn list(cfg: &ConfigHandle) -> String {
     }
     let mut s = String::new();
     for (cat, pc) in &c.plugins.categories {
-        let _ = writeln!(s, "【{cat}】当前 {}（可选：{}）", pc.active, pc.providers.keys().cloned().collect::<Vec<_>>().join(" "));
+        let _ = writeln!(s, "【{cat}】当前 {}\n可选：{}", pc.active, pc.providers.keys().cloned().collect::<Vec<_>>().join("、"));
         if let Some(t) = pc.providers.get(&pc.active) {
             for (k, v) in t {
                 let shown = match v {
@@ -23,8 +23,9 @@ pub fn list(cfg: &ConfigHandle) -> String {
                 let _ = writeln!(s, "  {k} = {shown}");
             }
         }
+        s.push('\n');
     }
-    s.push_str("修改：/provider <类别> <字段> <值>；切换：/provider <类别> use <名字>");
+    s.push_str("修改：/provider 类别 字段 值\n切换：/provider 类别 use 名字");
     s
 }
 

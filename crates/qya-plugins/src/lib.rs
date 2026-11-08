@@ -1,4 +1,4 @@
-//! 可插拔提供方（docs/01-architecture.md 8.2）：生图、语音合成、网页搜索、grok 搜索。
+//! 可插拔提供方（docs/01-architecture.md 8.2）：生图、语音合成、网页搜索、grok 搜索；另有代看视频的 watch_video。
 //!
 //! 配置结构为 `[plugins.<类别>] active = "名"` + `[plugins.<类别>.providers.<名>]`（含 `kind` 与各自字段）。
 //! 工具每次调用都从当前配置读取激活的提供方，因此 `/provider` 改动写回配置并 reload 后立即生效。
@@ -8,12 +8,15 @@ mod image;
 mod media;
 pub mod provider_cmd;
 mod search;
+mod shape;
 mod tts;
+mod video;
 
 pub use grok::{GrokFetch, GrokSearch};
 pub use image::ImageGenerate;
 pub use search::WebSearch;
 pub use tts::Speak;
+pub use video::WatchVideo;
 
 use qya_agent::{Tool, ToolRegistry};
 use qya_config::{Config, ConfigHandle, read_secret_line};
@@ -105,6 +108,12 @@ pub fn register(reg: &mut ToolRegistry, host: &Host) -> Vec<String> {
     if c.plugins.categories.contains_key("grok") {
         add(Arc::new(GrokSearch::new(host.clone())));
         add(Arc::new(GrokFetch::new(host.clone())));
+    }
+    // 看视频的模型须在唐语歌提供方的模型目录中且支持视频
+    if c.provider(&c.persona.provider).and_then(|p| p.models.get(&c.tools.video_model)).is_some_and(|m| m.video) {
+        add(Arc::new(WatchVideo::new(host.clone())));
+    } else {
+        tracing::warn!(model = %c.tools.video_model, "看视频的模型不可用，不注册 watch_video");
     }
     names
 }

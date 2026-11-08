@@ -379,3 +379,36 @@ async fn model_error_is_reported_with_inputs_saved() {
     assert_eq!(out.error.map(|e| e.kind), Some(qya_llm::ErrorKind::QuotaExhausted));
     assert_eq!(k.store().branch(sid).await.unwrap().len(), 1);
 }
+
+/// 返回固定长文本的工具。
+struct Big(ToolSpec);
+#[async_trait]
+impl Tool for Big {
+    fn spec(&self) -> &ToolSpec {
+        &self.0
+    }
+    async fn call(&self, _ctx: ToolCtx, _args: serde_json::Value) -> ToolOutput {
+        ToolOutput::ok("长".repeat(1000))
+    }
+}
+
+#[tokio::test]
+async fn folding_old_tool_results_avoids_a_summary_call() {
+    let big = Big(ToolSpec { name: "big".into(), description: "t".into(), parameters: serde_json::json!({"type":"object"}) });
+    let p = Fake::new(vec![calls(vec![call("1", "big", "{}")]), Message::assistant("好"), Message::assistant("嗯"), Message::assistant("继续好")]);
+    let (k, mut spec, sid) = setup(p.clone(), vec![Arc::new(big)], 100_000).await;
+    let q = Queues::default();
+    k.run_turn(&spec, sid, vec![Message::user("查一下")], &q, CancellationToken::new()).await.unwrap();
+    // 第二轮正常聊天，保证切分点之后保留一段尾部
+    k.run_turn(&spec, sid, vec![Message::user("说".repeat(60))], &q, CancellationToken::new()).await.unwrap();
+    spec.context_window = 900; // 旧工具结果约占 750 token，合计超过 90%；折叠后远低于 60%
+    let out = k.run_turn(&spec, sid, vec![Message::user("继续")], &q, CancellationToken::new()).await.unwrap();
+    assert_eq!(out.text, "继续好");
+    let reqs = p.reqs();
+    assert_eq!(reqs.len(), 4, "只有四次对话请求，没有额外的摘要调用");
+    let last = reqs.last().unwrap();
+    assert!(last.messages.iter().any(|m| m.text() == qya_agent::context::FOLDED_TOOL), "旧工具结果已折叠");
+    let branch = k.store().branch(sid).await.unwrap();
+    assert!(branch.iter().any(|e| e.kind == EntryKind::Fold));
+    assert!(branch.iter().any(|e| e.payload.to_string().contains(&"长".repeat(1000))), "原文仍在记录里");
+}

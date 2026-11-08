@@ -33,7 +33,7 @@ fn bash() -> String {
 
 fn shell(dir: &std::path::Path) -> Shell {
     let cfg = ShellSettings { shell: bash(), rtk: None, output_limit: 200, ..ShellSettings::default() };
-    Shell::new(cfg, Audit::new(dir.join("audit.jsonl")))
+    Shell::new(cfg, Audit::new(dir.join("audit.jsonl"))).with_spill(dir.join("tool-output"))
 }
 
 #[tokio::test]
@@ -46,6 +46,11 @@ async fn shell_runs_truncates_and_audits() {
     assert!(fail.is_error && fail.text.contains("退出码 3"));
     let long = sh.call(ctx(), json!({"command": "for i in $(seq 1 500); do echo line$i; done"})).await;
     assert!(long.text.contains("省略") && long.text.contains("line500"), "{}", long.text);
+    // 超长输出：完整内容存成文件，返回里给出路径
+    let saved = long.text.split("已保存到 ").nth(1).and_then(|r| r.split('；').next()).expect("应给出完整输出路径");
+    let full = std::fs::read_to_string(saved).unwrap();
+    assert_eq!(full.lines().count(), 500);
+    assert!(full.contains("line250"), "中间被省略的部分在文件里");
     let denied = sh.call(ctx(), json!({"command": "rm -rf /etc"})).await;
     assert!(denied.is_error && denied.text.contains("拒绝执行"));
     let audit = std::fs::read_to_string(d.join("audit.jsonl")).unwrap();

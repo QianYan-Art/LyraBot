@@ -3,6 +3,7 @@
 //! 每项含 title/url/site/date/passage/content/score；FromTime 参数会被拒绝。
 
 use crate::Host;
+use crate::shape::{self, Hit};
 use async_trait::async_trait;
 use qya_agent::{Concurrency, Tool, ToolCtx, ToolOutput};
 use qya_core::ToolSpec;
@@ -66,21 +67,23 @@ impl WebSearch {
     }
 }
 
-/// 把 Pages（JSON 字符串数组）整理成紧凑文本。
+/// 把 Pages（JSON 字符串数组）整理成紧凑文本：按相关度排序、去重、摘要在句子边界截断。
 pub fn render(query: &str, pages: &[Value]) -> String {
-    let items: Vec<Value> = pages.iter().filter_map(|p| p.as_str().and_then(|s| serde_json::from_str(s).ok())).collect();
-    if items.is_empty() {
-        return format!("“{query}”没有搜到结果，可以换个说法或去掉站点限制再试");
-    }
-    let mut out = Vec::new();
-    for (i, it) in items.iter().enumerate() {
-        let s = |k: &str| it.get(k).and_then(Value::as_str).unwrap_or("").trim().to_owned();
-        let date = s("date").split(' ').next().unwrap_or("").replace('/', "-");
-        let passage: String = s("passage").chars().take(300).collect();
-        let meta = [s("site"), date].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
-        out.push(format!("{}. {}（{meta}）\n{}\n{passage}", i + 1, s("title"), s("url")));
-    }
-    out.join("\n\n")
+    let mut items: Vec<Value> = pages.iter().filter_map(|p| p.as_str().and_then(|s| serde_json::from_str(s).ok())).collect();
+    // score 越高越相关；缺失时视为 0，排序稳定保留原顺序
+    items.sort_by(|a, b| b["score"].as_f64().unwrap_or(0.0).total_cmp(&a["score"].as_f64().unwrap_or(0.0)));
+    let hits = items
+        .iter()
+        .map(|it| {
+            let s = |k: &str| it.get(k).and_then(Value::as_str).unwrap_or("").trim().to_owned();
+            let date = s("date").split(' ').next().unwrap_or("").replace('/', "-");
+            let meta = [s("site"), date].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · ");
+            // passage 为空时退回正文开头
+            let summary = Some(s("passage")).filter(|p| !p.is_empty()).unwrap_or_else(|| s("content"));
+            Hit { title: s("title"), url: s("url"), meta, summary }
+        })
+        .collect();
+    shape::render(query, hits)
 }
 
 #[async_trait]
@@ -103,9 +106,14 @@ impl Tool for WebSearch {
 mod tests {
     #[test]
     fn render_pages() {
-        let p = serde_json::json!(["{\"title\":\"北京天气\",\"url\":\"https://w.cn/1\",\"site\":\"天气网\",\"date\":\"2026/08/09 11:44:36\",\"passage\":\"有雨\"}", "not json"]);
+        let p = serde_json::json!([
+            "{\"title\":\"旧闻\",\"url\":\"https://w.cn/0\",\"score\":0.2,\"passage\":\"去年\"}",
+            "{\"title\":\"北京天气\",\"url\":\"https://w.cn/1\",\"site\":\"天气网\",\"date\":\"2026/08/09 11:44:36\",\"score\":0.9,\"passage\":\"有雨\"}",
+            "{\"title\":\"北京天气\",\"url\":\"https://w.cn/1/\",\"score\":0.8,\"passage\":\"重复\"}",
+            "not json"
+        ]);
         let t = super::render("北京天气", p.as_array().unwrap());
-        assert_eq!(t, "1. 北京天气（天气网 · 2026-08-09）\nhttps://w.cn/1\n有雨");
+        assert_eq!(t, "1. 北京天气（天气网 · 2026-08-09）\nhttps://w.cn/1\n有雨\n\n2. 旧闻\nhttps://w.cn/0\n去年");
         assert!(super::render("x", &[]).contains("没有搜到"));
     }
 }

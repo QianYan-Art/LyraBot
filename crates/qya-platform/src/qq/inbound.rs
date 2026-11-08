@@ -1,4 +1,5 @@
-//! 入站 C2C 消息解析：文本、图片（落盘后以 file:// 引用）、语音（QQ 自带 asr_refer_text）、视频与文件（落盘并在文字中说明）。
+//! 入站 C2C 消息解析：文本、图片与视频（落盘后以 file:// 引用，按目标模型能力在请求时内联或改为提示）、
+//! 语音（QQ 自带 asr_refer_text）、文件（落盘并在文字中说明）。
 
 use qya_core::ContentPart;
 use serde_json::Value;
@@ -61,14 +62,17 @@ pub fn parse_c2c(d: &Value) -> Option<Parsed> {
 /// `saved[i]` 对应第 i 个附件的落盘路径（语音或下载失败为 None）。
 pub fn to_parts(p: &Parsed, saved: &[Option<PathBuf>]) -> Vec<ContentPart> {
     let mut notes = Vec::new();
-    let mut images = Vec::new();
+    let mut media = Vec::new();
     for (a, path) in p.attachments.iter().zip(saved) {
         match (a, path) {
             (Attachment::Voice { asr: Some(t) }, _) => notes.push(format!("〔语音转文字〕{t}")),
             (Attachment::Voice { asr: None }, _) => notes.push("〔阿颜发了一段语音，但没有拿到识别文字〕".to_owned()),
-            (Attachment::Image { .. }, Some(path)) => images.push(ContentPart::Image { url: file_url(path) }),
+            (Attachment::Image { .. }, Some(path)) => media.push(ContentPart::Image { url: file_url(path) }),
             (Attachment::Image { .. }, None) => notes.push("〔一张图片下载失败〕".to_owned()),
-            (Attachment::Video { name, .. }, Some(path)) => notes.push(format!("〔阿颜发来视频 {name}，已保存到 {}〕", path.display())),
+            (Attachment::Video { name, .. }, Some(path)) => {
+                notes.push(format!("〔阿颜发来视频 {name}，已保存到 {}〕", path.display()));
+                media.push(ContentPart::Video { url: file_url(path) });
+            }
             (Attachment::File { name, .. }, Some(path)) => notes.push(format!("〔阿颜发来文件 {name}，已保存到 {}〕", path.display())),
             (Attachment::Video { name, .. } | Attachment::File { name, .. }, None) => notes.push(format!("〔附件 {name} 下载失败〕")),
         }
@@ -84,7 +88,7 @@ pub fn to_parts(p: &Parsed, saved: &[Option<PathBuf>]) -> Vec<ContentPart> {
     if !text.is_empty() {
         parts.push(ContentPart::text(text));
     }
-    parts.extend(images);
+    parts.extend(media);
     parts
 }
 
@@ -131,5 +135,6 @@ mod tests {
         assert!(text.starts_with("看看这个\n〔语音转文字〕晚上吃什么\n〔阿颜发来视频 猫.mp4"));
         assert!(text.ends_with("〔附件 报告.pdf 下载失败〕"));
         assert_eq!(parts[1], ContentPart::Image { url: "file:///m/a.jpg".into() });
+        assert_eq!(parts[2], ContentPart::Video { url: "file:///m/b.mp4".into() });
     }
 }

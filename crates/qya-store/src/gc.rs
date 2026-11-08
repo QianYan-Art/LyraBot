@@ -95,9 +95,15 @@ impl Store {
                     let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
                     tx.execute(&format!("DELETE FROM mailbox WHERE to_session IN ({list}) OR from_session IN ({list})"), [])?;
                     tx.execute(&format!("DELETE FROM run_queue WHERE worker IN ({list})"), [])?;
+                    tx.execute(&format!("DELETE FROM recall_fts WHERE session IN ({list})"), [])?;
                     // 同一语句内删除整组条目；SQLite 在语句结束时检查外键
                     entries = tx.execute(&format!("DELETE FROM entries WHERE session_id IN ({list})"), [])?;
                     tx.execute(&format!("DELETE FROM sessions WHERE id IN ({list})"), [])?;
+                    // 条目编号可能被复用（删掉了编号最大的条目）：检查点回调到现存最大编号，之后的新条目照常入索引
+                    tx.execute(
+                        "UPDATE kv SET value = CAST(MIN(CAST(value AS INTEGER), (SELECT IFNULL(MAX(id), 0) FROM entries)) AS TEXT) WHERE key = ?1",
+                        [crate::recall::KV_RECALL_CKPT],
+                    )?;
                     for id in &ids {
                         tx.execute("DELETE FROM kv WHERE key IN (?1, ?2)", params![format!("persona_s2:{id}"), format!("learn_ckpt:{id}")])?;
                     }
@@ -177,6 +183,26 @@ mod tests {
 
     fn sess(kind: SessionKind) -> NewSession {
         NewSession { kind: Some(kind), model: "m".into(), effort: "low".into(), ..Default::default() }
+    }
+
+    #[tokio::test]
+    async fn gc_rewinds_recall_checkpoint_when_ids_are_reused() {
+        let s = Store::in_memory().unwrap();
+        let cur = s.create_session(sess(SessionKind::Persona)).await.unwrap();
+        s.append(cur, EntryKind::Message, json!({"role":"user","content":"早上好"}), 1).await.unwrap();
+        // 编号最大的条目属于一个已结束的旧会话
+        let old = s.create_session(sess(SessionKind::Persona)).await.unwrap();
+        s.append(old, EntryKind::Message, json!({"role":"user","content":"旧会话里说过的年糕"}), 1).await.unwrap();
+        s.update_session(old, None, None, Some(SessionStatus::Closed)).await.unwrap();
+        age(&s, old, 40).await;
+        assert_eq!(s.index_recall().await.unwrap(), 2);
+        let r = s.gc_sessions(30, vec![cur]).await.unwrap();
+        assert_eq!(r.deleted_ids, vec![old]);
+        // 删除后新条目会复用旧编号；检查点已回调，仍能入索引
+        s.append(cur, EntryKind::Message, json!({"role":"user","content":"新说的年糕近况"}), 1).await.unwrap();
+        assert_eq!(s.index_recall().await.unwrap(), 1);
+        let hits = s.recall_search("年糕", 0, 10).await.unwrap();
+        assert_eq!(hits.iter().map(|h| h.text.as_str()).collect::<Vec<_>>(), vec!["新说的年糕近况"], "旧会话索引已随 GC 删除");
     }
 
     #[tokio::test]

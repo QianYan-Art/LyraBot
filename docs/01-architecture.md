@@ -108,6 +108,8 @@ pub enum StreamEvent { TextDelta(String), ReasoningDelta(String),
 - 思考回放：带工具调用的 assistant 消息回放时携带模型返回的真实 `reasoning_content`（实测通过）；缺失时补单个空格，不伪造内容。
 - 缓存：命中数在 `usage.prompt_tokens_details.cached_tokens`；CLI 实测第二轮命中 87%。不把五小时额度窗口当缓存时间。
 - `/models` 返回的 `context_length`、模态、effort 可选值可用于启动自检（`qya --check` 已比对配置与可用列表）。
+- 模态（2026-11-08 `/models` 复核）：`k3-256k` 输入只有文字与图片（`supports_video_in=false`）；`kimi-for-coding`、`kimi-for-coding-highspeed`、`k3`、`k3.1-pro` 系列支持视频。视频以 `{"type":"video_url","video_url":{"url":"data:video/mp4;base64,…"}}` 发送，服务器实测通过（2 秒测试视频 566 输入 token）。
+- 媒体编码按目标模型的 `vision` / `video` 能力（配置的模型目录）处理：本地 `file://` 图片（≤10 MB）与视频（≤20 MB）在请求时才转为 data URI；模型不支持视频时不发画面，改为一句提示“需要了解内容时用 watch_video 查看 <路径>”，支持视频但文件超限时同样提示走 watch_video。
 
 ### 4.3 可靠性
 
@@ -155,6 +157,10 @@ pub trait Tool: Send + Sync {
 
 - 会话以条目树存储（SQLite `entries`：`id, session_id, parent_id, kind, payload, tokens, created_at`），会话记录当前叶子 `leaf_id`。分叉 = 新会话指向父会话某条目，零拷贝。
 - 压缩：上下文估算达到模型窗口的 90%（可配）时，对较早的前缀生成摘要，写入 `compaction` 条目（记录被覆盖的范围）；构建上下文时从最近的 compaction 往后取。摘要提示词要求保留未完成任务、阿颜偏好和承诺事项。
+- 压缩两步走（2026-11-08，借鉴 Sodium 记忆系统）：
+  - 先折叠：切分点之前的工具结果在上下文中替换为一行占位（追加一条 `fold` 条目，原文不动）；折叠后低于窗口 60% 就到此为止，不调用模型。
+  - 再摘要：仍不够时做“枚举式”摘要——先清点日期与截止、数字与金额、人名与账号、已确认决定、阿颜纠正过的地方，再输出 `{summary, capsule}`；胶囊含目标、要求与约束、已确认决定、验证状态、下一步，由 `render_compaction` 按固定标签确定性渲染（每项 ≤8 条、每条 ≤150 字、胶囊 ≤1200 字）。不是 JSON 时当作纯文本摘要；JSON 残缺时按无摘要处理，不把残骸写进摘要。
+  - 模型错误以 `StopReason::Error` 连同错误交回（输入已落库）；只有存储等内部错误以 `Err` 返回。
 - token 估算：本地按字符做近似估算，每轮用服务端 usage 校准。
 
 ## 6. 人格层（qya-persona）
@@ -206,7 +212,7 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料
 - 表情：`sticker(emotion, hint?)` 工具；扫描 `<stickers_dir>`（默认 `<data_dir>/stickers`），按“情绪-场景-角色”文件名索引，情绪清单写进工具说明；图片随回复文字之后发送。目录为空时不暴露该工具。
 - 参数位于配置 `[persona.pacer]`：`debounce_ms`、`max_wait_ms`、`max_segments`。
 
-### 6.3 表达与黑话学习（learner）
+### 6.3 学习与记忆（learner + consolidate）
 
 - 触发：每累计 30 条阿颜消息或空闲 10 分钟，后台任务用低价模型（默认 `kimi-for-coding`，effort=low）批量分析新增对话。
 - 产出：`expressions(situation, text, kind[habit|jargon], meaning, hits, last_used, weight)`，存 SQLite；按时间衰减，上限 300 条，超出淘汰低权重条目。
@@ -220,6 +226,16 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料
 - 入库（schema v2：`triggers` 列 + `(kind,text)` 唯一索引）：已存在则命中 +1、权重 +0.5（上限 5）；本批未出现的条目权重 −0.05，低于 0.2 删除，总数超过 300 淘汰低权重。
 - 检索：Aho-Corasick 匹配触发词（权重 2/次）+ 字符二元组 Jaccard（无触发词命中时要求 ≥ 0.2）+ 权重×0.1，取 top-3，渲染为 `〔你们之间的说法……〕` 附在时间之后，不超过 `inject_max_chars`（默认 220 字）。
 - 实测：一段 6 条消息的对话学到“寄了 / 依托答辩 / 摸会儿鱼 / 贴贴”四条，含义准确；之后消息含“寄了”时提示被注入，回复理解正确。
+
+**记忆整理（2026-11-08，借鉴 Sodium 的两阶段闸门与 Anthropic dreaming；原则“写少读多”，聊天路径不为记忆多花调用）**
+
+- 学习器一次调用同时输出 `expressions` 与 `memories`。记忆候选读双方对话，但只记阿颜陈述的（stated）、阿颜明确认可的约定（agreed）、阿颜纠正过的（corrected）；依据缺失或不在这三种之内的一律丢弃；唐语歌对自己的描述与剧情发挥、一次性任务、带时间的提醒、隐私凭据都不记。候选进入 `memory_candidates` 表。
+- 整理：候选 ≥ 5 条或最早一条超过一天、且唐语歌空闲时进行（`/learn now` 立即）。第一阶段只去掉空白与句末标点后完全相同的（保留 `C++`/`C#` 这类符号差异），第二阶段一次低价调用让模型只给出 `add/update/remove` 操作，由 `consolidate::apply` 确定性执行：按原编号改删、再追加；单次最多删 3 条；每个文件守住 2000 字，超限的新增放弃、修改导致超限则该文件整体保持原样并撤掉对应说明；输出里有任何无法解释的操作则整批无效、候选保留。
+- 一致性：等待模型时不持锁；模型返回后在共享的记忆写锁（唐语歌 `memory` 工具、`/learn forget`、`/learn undo` 共用）内重读，文件已变就放弃本轮。先写修订（整理前后全文、变更说明，存 `memory_revisions`，保留最近 20 次）再原子写文件（临时文件改名），写失败则恢复文件、撤销修订、放回候选。启动时若发现最近一次修订已记下、但文件停在整理前或只写了一半（每个文件都等于整理前或整理后），补写完整；文件被手动改过则不碰。
+- 撤销：`/learn undo` 只在当前文件仍等于那次整理结果时恢复整理前内容，避免覆盖之后的手动修改。记忆快照按会话冻结，所有改动在新会话生效。
+- 唐语歌的 `memory` 工具保留，说明改为“只在阿颜明确让你记住、或纠正你记错的事时写”。
+- 说法检索的情境匹配改为中文单字集合（去掉高频虚字）加 3 字以上英文词的 Jaccard，对语序不敏感（Sodium 文档的结论：bigram 对语序太脆）。
+- 未采纳：向量检索与联想网络（需要常驻嵌入模型，记忆只有几千字、本来整份注入）、情绪天气与“做梦”独白、主动开口。
 - 配置 `[persona.learner]`：`enabled`、`model`（默认 kimi-for-coding）、`effort`、`batch_messages`、`idle_minutes`、`min_messages`、`max_items`、`inject_max_chars`。
 
 ## 7. 多代理编排（qya-orchestra）
@@ -288,7 +304,7 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料
 
 **实现（任务 10、11，2026-11-07，crate `qya-tools`）**
 
-- `shell`：`<shell> -lc`；执行前调用 `rtk rewrite <cmd>`（2 s 超时，退出码 0/3 且有输出才采用，与 Hermes rtk-rewrite 插件一致）；Unix 以 `setsid` 启动，超时/取消时 `kill -KILL -<pgid>` 清理整个进程组；输出超 `output_limit` 保留首 40% 尾 60%；每次调用（含被拒绝的）写入审计 JSONL。Windows 开发机需把 shell 指向 Git Bash，否则会解析到 WSL 的 bash.exe。
+- `shell`：`<shell> -lc`；执行前调用 `rtk rewrite <cmd>`（2 s 超时，退出码 0/3 且有输出才采用，与 Hermes rtk-rewrite 插件一致）；输出超过 `output_limit`（默认 8000 字）时，完整内容存到 `<media_dir>/tool-output/`（随每日媒体清理回收），返回首尾与“共多少行、存在哪里、用 fs_search / fs_read 细看”的说明，超过每路 4 MB 捕获上限时如实标注；Unix 以 `setsid` 启动，超时/取消时 `kill -KILL -<pgid>` 清理整个进程组；输出超 `output_limit` 保留首 40% 尾 60%；每次调用（含被拒绝的）写入审计 JSONL。Windows 开发机需把 shell 指向 Git Bash，否则会解析到 WSL 的 bash.exe。
 - `fs_read / fs_write / fs_patch / fs_search`：patch 要求 old 唯一（或 replace_all）；搜索优先 ripgrep，退回 grep。
 - `memory`：§ 分隔条目，每文件 2000 字；按角色构造实例——唐语歌可写 `user`/`memory`，专员只可写自己的记忆文件（经编排的 extras 钩子注入）。
 - `todo`：会话内整表覆盖的步骤清单。原设计中的 `send` 工具未实现：执行者产出的媒体随〔后台结果〕由唐语歌那一轮一起发出，不需要执行者直接对阿颜说话。
@@ -297,9 +313,16 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料
 - `komari_report`：Python 版逐条移植为 Rust（同样的校验、错误码、口径），实测 13 台节点 12 台有效。
 - `blog_sync`：调用 `/usr/local/bin/blog-sync-kbase.sh`（1300 s），日志含“代理同步失败”时在汇报首行提示一次，不干预脚本。
 - `mail`：保留 Hermes 已验证的 `mail_vps_fetch.py`（仅标准库，经受限 SSH key；位于 `assets/tools/`），工具把结构化参数映射为命令行、做必填校验、解析 JSON，`media_tag/preferred_media_tag` 指向的附件与链接 txt 自动投递；写操作失败提示“不要重试、先 read 核实”。Python 只在邮件操作时启动，不在热路径。
-- 工具分配：唐语歌 `persona.tools` 默认 image_generate、speak、web_search、cron、skill_view（另有人格专属 persona_notes、delegate、agent_ctl、memory、sticker）；worker 与专员的工具清单见配置 `[orchestra]`。
+- `recall`（2026-11-08）：检索唐语歌与阿颜的过往对话（已结束的会话与压缩摘要），查询时先在一个事务里把检查点之后的新条目增量写入 FTS5 trigram 索引，再在 SQL 中排除当前会话后取最新 8 条，返回命中处前后约 60 字的片段（总计 ≤1500 字），注明日期与说话人。3 字以下的查询退回子串扫描。不用就没有任何常驻开销；GC 删除会话时一并删除索引并回调检查点（条目编号可能被复用）。
+- 工具分配：唐语歌 `persona.tools` 默认 image_generate、speak、web_search、cron、skill_view、recall（另有人格专属 persona_notes、delegate、agent_ctl、memory、sticker；注册了 watch_video 时自动带上）；worker 与专员的工具清单见配置 `[orchestra]`。
 
 ### 8.2 可插拔提供方（qya-plugins）
+
+**2026-11-08 补充**
+
+- `watch_video`：用 `[tools] video_model`（默认 `kimi-for-coding`，须在唐语歌提供方的模型目录中且支持视频，否则不注册）代看视频并回答问题，唐语歌再用自己的口吻回复。只允许读取媒体目录内的文件；超过 20 MB 先用 ffmpeg 压到 480p、每秒 2 帧、去掉音轨（独立临时文件、原子改名发布，结果缓存在 `<media_dir>/video-cache/`，所有失败出口清理临时文件，180 s 超时）；超过 10 分钟只看前 10 分钟并在结果开头注明。
+- 搜索结果整形（`shape.rs`）：元宝与 grok 搜索统一为“标题（来源 · 日期）/ 链接 / 摘要”的紧凑列表；按链接（协议、`www.`、主机名大小写、末尾斜杠、锚点不计，路径与参数区分大小写）与标题去重；元宝按 `score` 排序、摘要缺失时用正文开头；摘要在句子边界截到 200 字。grok 搜索解析 JSON 数组后同样渲染（失败时截取原文前 4000 字）。
+- `grok_fetch` 增加 `focus`：只提取相关段落（≤3000 字），默认上限由 30000 字降到 12000 字。
 
 ```rust
 pub trait ImageProvider { async fn generate(&self, req: ImageReq) -> Result<Vec<MediaRef>>; async fn edit(...); }
@@ -416,6 +439,9 @@ pub trait Platform: Send + Sync {
 | `sessions` | id、kind(persona/worker/specialist)、parent_session、fork_entry、model、effort、status、leaf_id、run_owner（执行者运行标记）、created/updated |
 | `entries` | 会话树条目（见 5.3） |
 | `mailbox` | 执行者 → 唐语歌的汇报信箱（未确认的汇报，确认后删除） |
+| `memory_candidates` | 学习器提取、等待整理的记忆候选（v4） |
+| `memory_revisions` | 记忆整理的修订：整理前后全文与变更说明，保留最近 20 次，供 `/learn` 与撤销（v4） |
+| `recall_fts` | 过往对话检索的 FTS5 trigram 索引（v4） |
 | `outbox` | 平台发件箱（暂时没有投递通道的出站消息） |
 | `run_queue` | 交给运行中执行者、尚未确定写进其会话的插话/追问 |
 | `expressions` | 表达/黑话库 |
@@ -433,22 +459,26 @@ pub trait Platform: Send + Sync {
 
 | 命令 | 作用 |
 |---|---|
-| `/help [命令]` | 命令列表或单个命令说明 |
-| `/status` | 模型、思考等级、上下文占用、缓存命中、运行中 worker、内存占用、运行时长 |
+| `/help [命令]` | 命令列表（一行一个加一句说明）；带命令名看详细用法 |
+| `/status` | 版本、会话、模型与思考等级、上下文占用、用量与缓存命中、后台任务、内存、运行时长 |
 | `/new` | 唐语歌开启新会话（记忆、关系不变，只是技术会话重开） |
+| `/sessions` | 最近会话、各类会话数量、记录条数与数据库大小 |
+| `/gc [天数]` | 清理已结束且超过 N 天（默认 30）没有活动的会话；`/gc 0` 清理全部已结束会话 |
 | `/stop` | 停止唐语歌当前这一轮（不影响后台 worker） |
-| `/compact` | 立即压缩当前会话 |
+| `/compact` | 立即压缩当前会话（先折叠，不够再摘要） |
 | `/model [名称]` | 查看/切换唐语歌模型（校验当前 key 可用） |
 | `/effort [等级]` | 查看/切换唐语歌思考等级 |
-| `/agents` | 列出 worker 与专员：id、状态、模型、耗时、一句话进度 |
+| `/learn` | 学习与记忆总览；`list 说法\|记忆`、`forget 编号\|u3\|m2`、`now`、`undo`、`on\|off` |
+| `/agents` | 列出 worker 与专员：编号、状态、模型、耗时、进度 |
 | `/agent <id> [消息]` | 查看某个 worker 详情；带消息则续接/插话 |
 | `/agent <id> stop` | 停止某个 worker |
 | `/provider` | 列出生图/语音/搜索/grok 当前提供方与模型 |
 | `/provider <类别> <字段> <值>` | 例：`/provider image model gpt-image-2.5-flare`；写回配置并热生效 |
-| `/cron [list\|add\|rm\|pause\|resume]` | 定时任务管理 |
-| `/learn [list\|forget <id>\|on\|off]` | 表达/黑话学习管理 |
-| `/reload` | 重新加载配置与 secret 文件 |
-| `/restart!` | 排空当前任务后由 systemd 重启进程（不删会话） |
+| `/reload` | 重新加载配置、secret 文件与人格资产 |
+
+定时任务由唐语歌的 `cron` 工具管理（没有单独的聊天命令）；原设计中的 `/restart!` 未实现，进程重启由部署流程执行，重启时后台任务以“被中断”汇报交回。
+
+输出排版（2026-11-08）：QQ 单聊只显示纯文本、手机一行约 20 字，命令回复用【】分段、一行一到两项、段间空行，token 显示为 `12.3k` / `1.0M`，不用 Markdown 与竖线、破折号。
 
 ## 12. 性能与长期运行
 

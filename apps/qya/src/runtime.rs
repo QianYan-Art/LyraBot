@@ -25,6 +25,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+mod learning;
+
 const KV_PERSONA_SESSION: &str = "persona_session";
 const KV_LEARN_ENABLED: &str = "learn:enabled";
 
@@ -45,7 +47,7 @@ struct PersonaKit {
 }
 
 impl PersonaKit {
-    fn load(c: &Config, sup: &Supervisor) -> Result<Self> {
+    fn load(c: &Config, sup: &Supervisor, memory_lock: &Arc<tokio::sync::Mutex<()>>) -> Result<Self> {
         let pc = &c.persona;
         let persona = Persona::load(&pc.assets_dir).context("装载人格资产")?;
         let memory = Memory::new(
@@ -53,8 +55,9 @@ impl PersonaKit {
                 MemoryTarget { name: "user".into(), file: pc.memory_dir.join("user.md"), about: "关于阿颜的事实与偏好".into() },
                 MemoryTarget { name: "memory".into(), file: pc.memory_dir.join("memory.md"), about: "你自己的备忘（你们之间的约定、共同的事）".into() },
             ],
-            "阿颜明确让你记住、或你确认是长期偏好时再写。",
-        );
+            "只在阿颜明确让你记住、或纠正你记错的事时写；日常聊到的事实与约定会在后台自动整理进记忆，不必每次都写。",
+        )
+        .with_lock(memory_lock.clone());
         let mut tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(persona.notes_tool()),
             Arc::new(DelegateTool::new(sup.clone(), c)),
@@ -82,6 +85,8 @@ pub struct Runtime {
     /// 表达/黑话检索索引；学习或删除后整体替换
     index: Mutex<Arc<Index>>,
     learning: AtomicBool,
+    /// 唐语歌记忆文件（user.md / memory.md）的写锁：memory 工具、后台整理、/learn forget 与 undo 共用
+    memory_lock: Arc<tokio::sync::Mutex<()>>,
     state: Mutex<State>,
     queues: Arc<Queues>,
     platform: OnceLock<Arc<dyn Platform>>,
@@ -173,7 +178,8 @@ impl Runtime {
         let (tx, reports) = mpsc::unbounded_channel();
         let sup = Supervisor::new(cfg.clone(), kernel.clone(), tools.clone(), tx, qya_orchestra::default_providers())
             .with_extras(Arc::new(specialist_memory));
-        let kit = Arc::new(PersonaKit::load(&c, &sup)?);
+        let memory_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let kit = Arc::new(PersonaKit::load(&c, &sup, &memory_lock)?);
         let index = Arc::new(Index::build(store.expressions().await?));
         let rt = Self {
             cfg,
@@ -186,6 +192,7 @@ impl Runtime {
             kit: Mutex::new(kit),
             index: Mutex::new(index),
             learning: AtomicBool::new(false),
+            memory_lock,
             state: Mutex::new(State::default()),
             queues: Arc::new(Queues::default()),
             platform: OnceLock::new(),
@@ -198,6 +205,12 @@ impl Runtime {
         rt.state().session = session;
         // 在平台接入、定时任务启动之前：把上次被中断的任务转成汇报，并装载所有未确认的汇报
         let recovered = rt.sup.recover().await.map_err(anyhow::Error::msg).context("恢复被中断的后台任务")?;
+        // 上次记忆整理若在写文件途中退出，补写完整（修订已记下）
+        if let Some(rev) = rt.store.last_memory_revision().await?
+            && rt.finish_interrupted_consolidation(&rev)?
+        {
+            tracing::warn!(revision = rev.id, "补写了上次中断的记忆整理");
+        }
         let mail = rt.store.pending_mail().await?;
         {
             let mut st = rt.state();
@@ -436,15 +449,14 @@ impl Runtime {
         self.sup.forget(&r.deleted_ids);
         let mb = |b: i64| b as f64 / 1048576.0;
         let mut s = format!(
-            "已清理 {} 天前的 {} 个会话、{} 条记录；数据库 {:.2} MB → {:.2} MB",
-            days,
+            "已清理结束超过 {days} 天的会话 {} 个、记录 {} 条\n数据库 {:.2} MB → {:.2} MB",
             r.sessions,
             r.entries,
             mb(r.bytes_before),
             mb(r.bytes_after)
         );
         if r.kept_referenced > 0 {
-            s.push_str(&format!("（另有 {} 个会话仍被较新的会话引用，暂时保留）", r.kept_referenced));
+            s.push_str(&format!("\n另有 {} 个仍被较新的会话引用，暂时保留", r.kept_referenced));
         }
         Ok(s)
     }
@@ -457,23 +469,25 @@ impl Runtime {
         let fmt = |ms: i64| {
             jiff::Timestamp::from_millisecond(ms).map(|t| t.to_zoned(tz.clone()).strftime("%m-%d %H:%M").to_string()).unwrap_or_default()
         };
-        let mut s = String::from("唐语歌的会话（最近 10 个）：\n");
+        let mut s = String::from("【唐语歌的会话】最近 10 个\n");
         for x in &list {
             let mark = if x.id == cur { "▶ 当前" } else if x.status == "closed" { "已结束" } else { "历史" };
-            s.push_str(&format!("#{} {mark} · {} 条消息 · 最后 {}（创建 {}）\n", x.id, x.messages, fmt(x.updated_at), fmt(x.created_at)));
+            s.push_str(&format!("#{} {mark}\n  {} 条消息，最后 {}\n", x.id, x.messages, fmt(x.updated_at)));
         }
         let label = |k: &str, st: &str| match (k, st) {
-            ("persona", "active") => "唐语歌·进行中",
-            ("persona", "closed") => "唐语歌·已结束",
-            ("worker", "active") => "后台任务·进行中",
-            ("worker", "archived") => "后台任务·已归档",
+            ("persona", "active") => "唐语歌进行中",
+            ("persona", "closed") => "唐语歌已结束",
+            ("worker", "active") => "后台任务进行中",
+            ("worker", "archived") => "后台任务已归档",
             ("specialist", _) => "常驻专员",
             _ => "其他",
         };
-        let parts: Vec<String> = stats.sessions.iter().map(|(k, st, n)| format!("{} {n}", label(k, st))).collect();
+        s.push_str("\n【合计】\n");
+        for (k, st, n) in &stats.sessions {
+            s.push_str(&format!("{} {n} 个\n", label(k, st)));
+        }
         s.push_str(&format!(
-            "合计：{}\n记录 {} 条 · 数据库 {:.2} MB · 自动清理每周一次，保留 {} 天",
-            parts.join("，"),
+            "记录 {} 条，数据库 {:.2} MB\n\n每周自动检查一次，删除结束超过 {} 天的会话",
             stats.entries,
             stats.bytes as f64 / 1048576.0,
             self.cfg.get().agent.gc_days
@@ -748,7 +762,11 @@ impl Runtime {
         let info = model_info(c, &s.model)?;
         let kit = self.kit();
         let s2 = self.snapshot(s.id).await?;
-        let wanted: Vec<&str> = c.persona.tools.iter().map(String::as_str).filter(|n| self.tools.get(n).is_some()).collect();
+        let mut wanted: Vec<&str> = c.persona.tools.iter().map(String::as_str).filter(|n| self.tools.get(n).is_some()).collect();
+        // watch_video：当前模型看不了视频时代看；模型支持视频但视频超过内联上限时也靠它回退
+        if self.tools.get("watch_video").is_some() && !wanted.contains(&"watch_video") {
+            wanted.push("watch_video");
+        }
         let mut tools = self.tools.select(&wanted).map_err(anyhow::Error::msg)?;
         for t in &kit.tools {
             tools = tools.with(t.clone());
@@ -796,7 +814,7 @@ impl Runtime {
                 let id = self.new_persona_session().await?;
                 self.state().session = id;
                 self.store.update_session(old, None, None, Some(qya_store::SessionStatus::Closed)).await?;
-                format!("已开启新会话 #{id}（记忆与关系不变；旧会话 #{old} 已结束，{} 天后可被清理）", c.agent.gc_days)
+                format!("已开启新会话 #{id}\n记忆和关系不变；旧会话 #{old} 已结束，{} 天后可被清理", c.agent.gc_days)
             }
             Command::Sessions => self.sessions_report().await?,
             Command::Gc(days) => self.gc(days.unwrap_or(c.agent.gc_days)).await?,
@@ -817,7 +835,7 @@ impl Runtime {
                 let ctx = qya_agent::context::build(&self.store.branch(s.id).await?)?;
                 let est = qya_agent::context::estimate_messages(&ctx);
                 if self.kernel.compact(&spec, s.id, &ctx, est, &CancellationToken::new()).await? {
-                    format!("已压缩（压缩前约 {est} token）")
+                    format!("已压缩，压缩前约 {} token", tokens(est))
                 } else {
                     "内容太少，无需压缩".into()
                 }
@@ -825,8 +843,8 @@ impl Runtime {
             Command::Model(None) => {
                 let s = self.store.session(self.session()).await?;
                 let p = c.provider(&c.persona.provider).context("persona provider 未配置")?;
-                let list: Vec<_> = p.models.keys().map(|m| if *m == s.model { format!("*{m}") } else { m.clone() }).collect();
-                format!("当前模型：{}\n可选：{}", s.model, list.join(" "))
+                let list: Vec<_> = p.models.keys().map(|m| format!("{} {m}", if *m == s.model { "▶" } else { "·" })).collect();
+                format!("当前模型：{}\n\n【可选】\n{}\n\n切换：/model 名称", s.model, list.join("\n"))
             }
             Command::Model(Some(m)) => {
                 model_info(&c, &m)?;
@@ -835,13 +853,13 @@ impl Runtime {
             }
             Command::Effort(None) => {
                 let s = self.store.session(self.session()).await?;
-                format!("当前思考等级：{}（可选 low/medium/high/xhigh/max）", s.effort)
+                format!("当前思考等级：{}\n可选：low / medium / high / xhigh / max", s.effort)
             }
             Command::Effort(Some(e)) => {
                 let e: Effort = e.parse().map_err(anyhow::Error::msg)?;
                 self.store.update_session(self.session(), None, Some(e.to_string()), None).await?;
                 let p = c.provider(&c.persona.provider).context("persona provider 未配置")?;
-                format!("思考等级已切换为 {e}（实际请求参数 {}）", p.effort_param(e))
+                format!("思考等级已切换为 {e}\n实际请求参数：{}", p.effort_param(e))
             }
             Command::Learn(cmd) => self.learn_command(cmd).await?,
             Command::Agents => qya_orchestra::render_list(&self.sup.list().await),
@@ -856,130 +874,10 @@ impl Runtime {
             },
             Command::Reload => {
                 let c = self.cfg.reload()?;
-                let kit = PersonaKit::load(&c, &self.sup)?;
+                let kit = PersonaKit::load(&c, &self.sup, &self.memory_lock)?;
                 *self.kit.lock().expect("kit 锁中毒") = Arc::new(kit);
-                "配置与人格资产已重新加载（记忆快照在新会话或压缩后生效）".into()
+                "配置与人格资产已重新加载\n记忆快照在新会话或压缩后生效".into()
             }
-        })
-    }
-
-    async fn learning_enabled(&self) -> Result<bool> {
-        Ok(self.cfg.get().persona.learner.enabled && self.store.kv_get(KV_LEARN_ENABLED).await?.as_deref() != Some("off"))
-    }
-
-    /// 后台学习循环：每分钟检查一次是否达到触发条件。
-    fn spawn_learner(self: Arc<Self>) {
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(60));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tick.tick().await;
-                match self.learn_once(false).await {
-                    Ok(Some(msg)) => tracing::info!(%msg, "表达学习完成"),
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!(error = %e, "表达学习失败"),
-                }
-            }
-        });
-    }
-
-    /// 执行一次学习。`force` 时忽略开关与阈值（/learn now）。未执行返回 `None`。
-    async fn learn_once(&self, force: bool) -> Result<Option<String>> {
-        let lc = self.cfg.get().persona.learner.clone();
-        if !force && !self.learning_enabled().await? {
-            return Ok(None);
-        }
-        let (session, phase, idle) = {
-            let st = self.state();
-            (st.session, st.phase, st.last_activity.map(|t| t.elapsed()))
-        };
-        let ckpt: i64 = self.store.kv_get(&kv_learn_ckpt(session)).await?.and_then(|v| v.parse().ok()).unwrap_or(0);
-        let count = self.store.count_user_messages_since(session, ckpt).await?;
-        if !force {
-            let idle_ok =
-                idle.is_some_and(|d| d >= Duration::from_secs(lc.idle_minutes * 60)) && count >= i64::from(lc.min_messages);
-            // 只在空闲时学习，不与回复抢占
-            if phase != Phase::Idle || !(count >= i64::from(lc.batch_messages) || idle_ok) {
-                return Ok(None);
-            }
-        }
-        if count == 0 {
-            return Ok(force.then(|| "没有新的消息可学习".to_owned()));
-        }
-        if self.learning.swap(true, Ordering::AcqRel) {
-            return Ok(force.then(|| "正在学习中".to_owned()));
-        }
-        let result = self.learn_batch(session, ckpt, &lc).await;
-        self.learning.store(false, Ordering::Release);
-        result.map(Some)
-    }
-
-    async fn learn_batch(&self, session: SessionId, ckpt: i64, lc: &qya_config::LearnerSettings) -> Result<String> {
-        let c = self.cfg.get();
-        let entries = self.store.messages_since(session, ckpt, 200).await?;
-        let last = entries.last().map(|e| e.id).unwrap_or(ckpt);
-        let msgs: Vec<Message> = entries.into_iter().filter_map(|e| serde_json::from_value(e.payload).ok()).collect();
-        let kit = self.kit();
-        let text = learner::transcript(&msgs, kit.persona.user_name(), "唐语歌");
-        let pcfg = c.provider(&c.persona.provider).context("persona provider 未配置")?;
-        let provider = qya_llm::build(pcfg)?;
-        let items = learner::learn(provider.as_ref(), &lc.model, lc.effort, &text, CancellationToken::new()).await?;
-        let n = items.len();
-        let (added, reinforced, removed) = self.store.learn_expressions(items, lc.max_items).await?;
-        self.store.kv_set(&kv_learn_ckpt(session), &last.to_string()).await?;
-        self.rebuild_index().await?;
-        Ok(format!("学习了 {} 条新消息：提取 {n} 条，新增 {added}，强化 {reinforced}，淘汰 {removed}", msgs.len()))
-    }
-
-    async fn rebuild_index(&self) -> Result<()> {
-        let index = Arc::new(Index::build(self.store.expressions().await?));
-        *self.index.lock().expect("index 锁中毒") = index;
-        Ok(())
-    }
-
-    async fn learn_command(&self, cmd: LearnCmd) -> Result<String> {
-        Ok(match cmd {
-            LearnCmd::List => {
-                let all = self.store.expressions().await?;
-                let on = if self.learning_enabled().await? { "开启" } else { "关闭" };
-                if all.is_empty() {
-                    format!("表达学习：{on}；还没有学到任何说法")
-                } else {
-                    let mut s = format!("表达学习：{on}；共 {} 条（按权重，最多显示 20 条）\n", all.len());
-                    for e in all.iter().take(20) {
-                        let kind = if e.kind == "habit" { "习惯" } else { "黑话" };
-                        s.push_str(&format!(
-                            "#{} [{kind}] {} — {}（权重 {:.1}）\n",
-                            e.id,
-                            e.text,
-                            e.meaning.as_deref().unwrap_or("-"),
-                            e.weight
-                        ));
-                    }
-                    s.trim_end().to_owned()
-                }
-            }
-            LearnCmd::Forget(id) => {
-                if self.store.forget_expression(id).await? {
-                    self.rebuild_index().await?;
-                    format!("已删除 #{id}")
-                } else {
-                    format!("没有 #{id}")
-                }
-            }
-            LearnCmd::On => {
-                self.store.kv_set(KV_LEARN_ENABLED, "on").await?;
-                if self.cfg.get().persona.learner.enabled {
-                    "表达学习已开启".into()
-                } else {
-                    "已记录开启，但配置 persona.learner.enabled=false，仍不会自动学习".into()
-                }
-            }
-            LearnCmd::Off => {
-                self.store.kv_set(KV_LEARN_ENABLED, "off").await?;
-                "表达学习已关闭（已学到的说法仍会注入，可用 /learn forget 删除）".into()
-            }
-            LearnCmd::Now => self.learn_once(true).await?.unwrap_or_default(),
         })
     }
 
@@ -1024,25 +922,20 @@ impl Runtime {
             Phase::Delivering => "发送中",
         };
         Ok(format!(
-            "qya {} · 会话 #{} · 模型 {} · 思考 {}\n对话上下文 ≈{} / {} token（{:.0}%，不含系统段）\n上一轮：输入 {} · 缓存命中 {:.0}% · 输出 {}\n累计：输入 {} · 缓存命中 {:.0}%\n状态：{} · 待合并 {} · 后台进行中 {}\n内存 {} MB · 运行 {}h{}m",
+            "【状态】qya {}\n会话 #{}，{phase}\n模型 {}，思考 {}\n\n【上下文】\n约 {} / {}（{:.0}%）\n\n【用量】\n上一轮：输入 {}，命中 {:.0}%，输出 {}\n累计：输入 {}，命中 {:.0}%\n\n【运行】\n待合并 {pending} 条，后台进行中 {workers} 个\n内存 {rss} MB，已运行 {}",
             crate::VERSION,
             s.id,
             s.model,
             s.effort,
-            est,
-            info.context_length,
+            tokens(est),
+            tokens(info.context_length),
             est as f64 * 100.0 / info.context_length as f64,
-            last.prompt_tokens,
+            tokens(last.prompt_tokens),
             hit(&last),
-            last.completion_tokens,
-            total.prompt_tokens,
+            tokens(last.completion_tokens),
+            tokens(total.prompt_tokens),
             hit(&total),
-            phase,
-            pending,
-            workers,
-            rss,
-            up / 3600,
-            up % 3600 / 60
+            duration(up)
         ))
     }
 
@@ -1094,7 +987,7 @@ impl Runtime {
         }
         let info = self.sup.list().await.into_iter().find(|w| w.id == id);
         let status = info.as_ref().map(|w| w.status.label()).unwrap_or("已归档");
-        let mut s = format!("#{id} {} · {status} · {}/{}", row.name.unwrap_or_default(), row.model, row.effort);
+        let mut s = format!("#{id} {status}\n{}\n模型 {}，思考 {}", row.name.unwrap_or_default(), row.model, row.effort);
         if let Some(p) = info.and_then(|w| w.progress) {
             s.push_str(&format!("\n进度：{p}"));
         }
@@ -1106,9 +999,28 @@ impl Runtime {
             .find(|m| m.role == Role::Assistant && !m.text().trim().is_empty());
         if let Some(m) = last {
             let t: String = m.text().chars().take(800).collect();
-            s.push_str(&format!("\n最近回复：\n{t}"));
+            s.push_str(&format!("\n\n【最近回复】\n{t}"));
         }
         Ok(s)
+    }
+}
+
+/// token 数的简写：1234 → 1.2k，1234567 → 1.2M。
+fn tokens(n: u64) -> String {
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
+        _ => format!("{:.1}M", n as f64 / 1e6),
+    }
+}
+
+/// 时长的简写：3725 秒 → 1 小时 2 分。
+fn duration(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs} 秒"),
+        60..3600 => format!("{} 分", secs / 60),
+        3600..86400 => format!("{} 小时 {} 分", secs / 3600, secs % 3600 / 60),
+        _ => format!("{} 天 {} 小时", secs / 86400, secs % 86400 / 3600),
     }
 }
 
@@ -1185,7 +1097,13 @@ fn friendly(kind: Option<qya_llm::ErrorKind>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Notify, Relay, State, requeue, settle};
+    use super::{Notify, Relay, State, duration, requeue, settle, tokens};
+
+    #[test]
+    fn compact_numbers_for_chat() {
+        assert_eq!((tokens(999), tokens(12_345), tokens(262_144), tokens(1_048_576)), ("999".into(), "12.3k".into(), "262.1k".into(), "1.0M".into()));
+        assert_eq!((duration(42), duration(125), duration(3_725), duration(90_000)), ("42 秒".into(), "2 分".into(), "1 小时 2 分".into(), "1 天 1 小时".into()));
+    }
     use qya_core::Message;
 
     fn relay(id: i64, notify: Notify) -> Relay {

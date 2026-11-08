@@ -1,7 +1,8 @@
-//! 表达与黑话学习（docs/01-architecture.md 6.3）。
+//! 学习（docs/01-architecture.md 6.3）：表达、黑话与长期记忆候选。
 //!
-//! - 后台：把一段新对话交给低价模型，只从阿颜说的话里提取专属说法，结果入库并衰减；
-//! - 前台：[`Index`] 在本地做触发词 + 字符二元组匹配，挑出至多 3 条渲染为尾注入，热路径不调用模型。
+//! - 后台：一段新对话交给低价模型，一次调用同时提取阿颜的专属说法与记忆候选；说法入库并衰减，
+//!   记忆候选入队等待空闲整理（见 [`crate::consolidate`]）；
+//! - 前台：[`Index`] 在本地做触发词 + 中文单字集合匹配，挑出至多 3 条渲染为尾注入，热路径不调用模型。
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use qya_core::{Effort, Message, Role};
@@ -11,16 +12,20 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
 use tokio_util::sync::CancellationToken;
 
-const LEARN_PROMPT: &str = "你在帮唐语歌整理她和阿颜私聊里的“专属说法”，让她以后更懂阿颜。\
-只从【阿颜】说的话里提取，唐语歌自己的话不算。输出 JSON 数组，每项字段：\
-kind（\"jargon\" 或 \"habit\"）、text（说法原文，≤20 字）、meaning（含义或该怎么理解回应，≤40 字）、\
-situation（通常在什么情境下说，≤30 字）、triggers（1~3 个会原样出现在消息里的关键词）。\n\
-- jargon：网络梗、缩写、谐音、自造词、你们之间的专属叫法与玩笑。\n\
-- habit：阿颜稳定的表达习惯，比如口头禅、对称呼的偏好、用某个词表达某种情绪。\n\
-不要提取：普通词汇、一次性的具体事件或任务细节、隐私（地址、电话、账号、密码）。\
-最多 8 条，宁缺毋滥；没有值得记的就输出 []。只输出 JSON，不要解释。";
+const LEARN_PROMPT: &str = "你在帮唐语歌整理她和阿颜的私聊，让她以后更懂阿颜。只输出一个 JSON 对象，不要解释：\
+{\"expressions\": [...], \"memories\": [...]}。\n\
+expressions：阿颜的专属说法，只从【阿颜】的话里提取，每项字段 kind（\"jargon\" 或 \"habit\"）、text（原文，≤20 字）、\
+meaning（含义或该怎么理解回应，≤40 字）、situation（通常在什么情境下说，≤30 字）、triggers（1~3 个会原样出现在消息里的关键词）。\
+jargon 是网络梗、缩写、谐音、自造词、你们之间的专属叫法与玩笑；habit 是阿颜稳定的表达习惯（口头禅、称呼偏好、用某个词表达某种情绪）。最多 8 条。\n\
+memories：值得长期记住的事，每项字段 target（\"user\" 关于阿颜本人，\"memory\" 你们之间的约定与共同的事）、\
+text（一句话，≤60 字，写清主语与关键细节）、basis（\"stated\" 阿颜亲口陈述，\"agreed\" 阿颜明确认可的约定，\"corrected\" 阿颜纠正过的地方）。\
+只记阿颜说过或明确认可的：唐语歌的话只用来理解上下文，她对自己的描述与剧情发挥一律不记。最多 6 条。\n\
+两类都不要提取：普通词汇、一次性的任务细节与过程、已解决的问题、带具体时间的提醒（那由定时任务负责）、\
+隐私凭据（地址、电话、账号、密码、密钥）。宁缺毋滥，没有值得记的就给空数组。";
 
 const MAX_TRANSCRIPT_CHARS: usize = 6000;
+/// 单批记忆候选上限。
+const MAX_MEMORIES: usize = 6;
 const MAX_MSG_CHARS: usize = 300;
 
 /// 把消息整理成学习用的对话稿（只取文本；保留最新部分）。
@@ -72,16 +77,71 @@ fn clip(s: &str, n: usize) -> String {
     s.trim().chars().take(n).collect()
 }
 
-/// 解析模型输出：容忍代码块包裹，丢弃不合规的条目。
-pub fn parse(output: &str) -> Vec<LearnedExpression> {
-    let (Some(a), Some(b)) = (output.find('['), output.rfind(']')) else { return Vec::new() };
-    if b < a {
-        return Vec::new();
-    }
-    let Ok(raw) = serde_json::from_str::<Vec<RawItem>>(&output[a..=b]) else {
-        tracing::warn!("表达学习输出不是合法 JSON，忽略本批");
-        return Vec::new();
+/// 一条记忆候选：目标文件（user / memory）、内容、依据（stated / agreed / corrected）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryNote {
+    pub target: String,
+    pub text: String,
+    pub basis: String,
+}
+
+/// 一次学习的结果。
+#[derive(Debug, Default, PartialEq)]
+pub struct Learned {
+    pub expressions: Vec<LearnedExpression>,
+    pub memories: Vec<MemoryNote>,
+}
+
+#[derive(Deserialize)]
+struct RawLearned {
+    #[serde(default)]
+    expressions: Vec<RawItem>,
+    #[serde(default)]
+    memories: Vec<RawMemory>,
+}
+
+#[derive(Deserialize)]
+struct RawMemory {
+    target: String,
+    text: String,
+    #[serde(default)]
+    basis: Option<String>,
+}
+
+/// 解析模型输出：容忍代码块包裹；兼容旧版只有说法数组的输出；丢弃不合规的条目。
+pub fn parse(output: &str) -> Learned {
+    let body = output.trim();
+    let raw = match (body.find('{'), body.find('[')) {
+        // 对象在数组之前出现：新格式
+        (Some(o), a) if a.is_none_or(|a| o < a) => body.rfind('}').filter(|&e| e > o).and_then(|e| serde_json::from_str::<RawLearned>(&body[o..=e]).ok()),
+        (_, Some(a)) => body
+            .rfind(']')
+            .filter(|&e| e > a)
+            .and_then(|e| serde_json::from_str::<Vec<RawItem>>(&body[a..=e]).ok())
+            .map(|expressions| RawLearned { expressions, memories: Vec::new() }),
+        _ => None,
     };
+    let Some(raw) = raw else {
+        tracing::warn!("学习输出不是合法 JSON，忽略本批");
+        return Learned::default();
+    };
+    Learned { expressions: parse_expressions(raw.expressions), memories: parse_memories(raw.memories) }
+}
+
+fn parse_memories(raw: Vec<RawMemory>) -> Vec<MemoryNote> {
+    raw.into_iter()
+        .filter(|m| matches!(m.target.as_str(), "user" | "memory"))
+        .filter_map(|m| {
+            // 依据必须是三种来源之一；缺失或无法识别的一律不记
+            let basis = m.basis.filter(|b| matches!(b.as_str(), "stated" | "agreed" | "corrected"))?;
+            let text = clip(&m.text, 60);
+            (text.chars().count() >= 4).then_some(MemoryNote { target: m.target, text, basis })
+        })
+        .take(MAX_MEMORIES)
+        .collect()
+}
+
+fn parse_expressions(raw: Vec<RawItem>) -> Vec<LearnedExpression> {
     raw.into_iter()
         .filter(|r| matches!(r.kind.as_str(), "jargon" | "habit"))
         .filter_map(|r| {
@@ -113,7 +173,7 @@ pub async fn learn(
     effort: Effort,
     transcript: &str,
     cancel: CancellationToken,
-) -> Result<Vec<LearnedExpression>, qya_llm::LlmError> {
+) -> Result<Learned, qya_llm::LlmError> {
     let req = ChatRequest {
         model: model.to_owned(),
         system: vec![LEARN_PROMPT.to_owned()],
@@ -171,14 +231,14 @@ impl Index {
                 *hit.entry(self.owner[m.pattern().as_usize()]).or_default() += 1;
             }
         }
-        let qb = bigrams(&q);
+        let qb = signal(&q);
         let mut scored: Vec<(f64, usize)> = self
             .items
             .iter()
             .enumerate()
             .filter_map(|(i, e)| {
                 let hits = hit.get(&i).copied().unwrap_or(0) as f64;
-                let sim = jaccard(&qb, &bigrams(&format!("{}{}", e.situation, e.text).to_lowercase()));
+                let sim = jaccard(&qb, &signal(&format!("{}{}", e.situation, e.text).to_lowercase()));
                 // 没有触发词命中时，要求情境相似度足够高，避免无关注入
                 if hits == 0.0 && sim < 0.2 {
                     return None;
@@ -208,12 +268,21 @@ impl Index {
     }
 }
 
-fn bigrams(s: &str) -> HashSet<(char, char)> {
-    let cs: Vec<char> = s.chars().filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation()).collect();
-    cs.windows(2).map(|w| (w[0], w[1])).collect()
+/// 高频虚字，不作为匹配信号。
+const STOP_CHARS: &str = "我你他她它们的了是不有在和就都很也吗吧呢啊呀哦嗯这那个要让被把从到于对向与及或之着过又还么什怎样一上下里会能可";
+
+/// 匹配信号：中文取有意义的单字集合（对语序不敏感，“我家猫”能匹配“猫叫年糕”），英文取 3 字以上的词。
+fn signal(s: &str) -> HashSet<String> {
+    let mut out: HashSet<String> = s
+        .chars()
+        .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c) && !STOP_CHARS.contains(*c))
+        .map(String::from)
+        .collect();
+    out.extend(s.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| w.len() >= 3).map(str::to_owned));
+    out
 }
 
-fn jaccard(a: &HashSet<(char, char)>, b: &HashSet<(char, char)>) -> f64 {
+fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
@@ -244,12 +313,30 @@ mod tests {
         let out = "```json\n[{\"kind\":\"jargon\",\"text\":\"寄了\",\"meaning\":\"失败\",\"situation\":\"搞砸\",\"triggers\":[\"寄了\",\"寄\"]},\
                    {\"kind\":\"other\",\"text\":\"x\"},{\"kind\":\"habit\",\"text\":\"  \"},\
                    {\"kind\":\"habit\",\"text\":\"小歌\",\"triggers\":[]}]\n```";
-        let v = parse(out);
-        assert_eq!(v.len(), 2);
+        let v = parse(out).expressions;
+        assert_eq!(v.len(), 2, "兼容旧版纯数组输出");
         assert_eq!(v[0].triggers, vec!["寄了"], "单字触发词被丢弃");
         assert_eq!(v[1].triggers, vec!["小歌"], "缺触发词时用原文");
-        assert!(parse("不是 JSON").is_empty());
-        assert!(parse("[]").is_empty());
+        assert_eq!(parse("不是 JSON"), Learned::default());
+        assert_eq!(parse("[]"), Learned::default());
+    }
+
+    #[test]
+    fn parse_expressions_and_memories() {
+        let out = r#"{"expressions": [{"kind":"jargon","text":"寄了","triggers":["寄了"]}],
+            "memories": [{"target":"user","text":"阿颜的猫叫年糕","basis":"stated"},
+                         {"target":"memory","text":"约好每周日晚上一起复盘","basis":"agreed"},
+                         {"target":"other","text":"无效目标"},
+                         {"target":"user","text":"短"},
+                         {"target":"user","text":"阿颜改用北京时间","basis":"guess"},
+                         {"target":"user","text":"阿颜住在杭州"}]}"#;
+        let l = parse(out);
+        assert_eq!(l.expressions.len(), 1);
+        assert_eq!(
+            l.memories.iter().map(|m| (m.target.as_str(), m.basis.as_str())).collect::<Vec<_>>(),
+            vec![("user", "stated"), ("memory", "agreed")],
+            "无效目标、过短条目、未知或缺失依据都丢弃"
+        );
     }
 
     #[test]
@@ -275,6 +362,8 @@ mod tests {
         assert!(h.contains("「寄了」=失败、搞砸"), "{h}");
         assert!(!h.contains("火星文") && !h.contains("毫无关系"));
         assert!(idx.hints("天气不错", 3, 200).is_none());
+        // 单字信号对语序不敏感：情境“说事情搞砸了”与“事情又搞砸”能匹配上
+        assert!(idx.hints("这件事情又搞砸了", 3, 200).is_some());
         assert!(idx.hints("寄了 绷不住", 3, 5).is_none(), "超出字数预算时不注入");
         assert!(Index::default().hints("寄了", 3, 200).is_none());
     }

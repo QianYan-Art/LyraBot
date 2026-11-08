@@ -2,6 +2,7 @@
 //! 移植自 Hermes grok-search 技能的提示词；web_map 与 Tavily 兜底未移植（web_search 已覆盖常规搜索）。
 
 use crate::Host;
+use crate::shape::Hit;
 use async_trait::async_trait;
 use qya_agent::{Concurrency, Tool, ToolCtx, ToolOutput};
 use qya_core::ToolSpec;
@@ -76,7 +77,7 @@ impl Tool for GrokSearch {
         let platform = args.get("platform").and_then(Value::as_str).map(|p| format!("\n\n专注于平台: {p}")).unwrap_or_default();
         let user = format!("{}\n{q}{platform}\n\n以 JSON 数组形式返回 3-10 个结果。", now_beijing());
         match chat(&self.host, SEARCH_PROMPT, user).await {
-            Ok(t) => ToolOutput::ok(crate::grok::clip(&t, 12_000)),
+            Ok(t) => ToolOutput::ok(render_search(q, &t)),
             Err(e) => ToolOutput::err(e),
         }
     }
@@ -91,10 +92,10 @@ impl GrokFetch {
     pub fn new(host: Host) -> Self {
         let spec = ToolSpec {
             name: "grok_fetch".into(),
-            description: "用 grok 获取一个网页的完整内容（转为 Markdown），用于阅读搜索结果中的具体页面。".into(),
+            description: "用 grok 读取一个网页（转为 Markdown），用于阅读搜索结果中的具体页面。只需要其中某部分时写 focus（如“安装步骤”“价格表”），只返回相关段落，读得更快也更省。".into(),
             parameters: json!({
                 "type": "object",
-                "properties": {"url": {"type": "string"}},
+                "properties": {"url": {"type": "string"}, "focus": {"type": "string"}},
                 "required": ["url"],
                 "additionalProperties": false
             }),
@@ -113,13 +114,49 @@ impl Tool for GrokFetch {
     }
     async fn call(&self, _ctx: ToolCtx, args: Value) -> ToolOutput {
         let Some(url) = args.get("url").and_then(Value::as_str).filter(|s| s.starts_with("http")) else { return ToolOutput::err("需要 http(s) 开头的 url") };
-        match chat(&self.host, FETCH_PROMPT, format!("{url}\n\n获取并返回结构化 Markdown。")).await {
-            Ok(t) => ToolOutput::ok(clip(&t, 30_000)),
+        let focus = args.get("focus").and_then(Value::as_str).map(str::trim).filter(|f| !f.is_empty());
+        let user = match focus {
+            Some(f) => format!("{url}\n\n只提取与「{f}」相关的段落、列表、表格或代码，保留原文措辞与关键数据，去掉导航、广告和页脚；不超过 3000 字。"),
+            None => format!("{url}\n\n获取并返回结构化 Markdown，去掉导航、广告和页脚。"),
+        };
+        match chat(&self.host, FETCH_PROMPT, user).await {
+            Ok(t) => ToolOutput::ok(clip(&t, FETCH_LIMIT)),
             Err(e) => ToolOutput::err(e),
         }
     }
 }
 
+/// 读网页结果的上限（字）。
+const FETCH_LIMIT: usize = 12_000;
+
+/// 把 grok 返回的 JSON 数组整理成与 web_search 一致的紧凑列表；不是合法 JSON 时截断原文兜底。
+fn render_search(query: &str, raw: &str) -> String {
+    let body = raw.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
+    let list = body.find('[').zip(body.rfind(']')).filter(|(a, b)| a < b).and_then(|(a, b)| serde_json::from_str::<Vec<Value>>(&body[a..=b]).ok());
+    let Some(list) = list else { return clip(raw, 4_000) };
+    let hits = list
+        .iter()
+        .map(|it| {
+            let s = |k: &str| it.get(k).and_then(Value::as_str).unwrap_or("").trim().to_owned();
+            Hit { title: s("title"), url: s("url"), meta: String::new(), summary: s("description") }
+        })
+        .collect();
+    crate::shape::render(query, hits)
+}
+
 pub(crate) fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.to_owned() } else { format!("{}…（已截断）", s.chars().take(n).collect::<String>()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_search;
+
+    #[test]
+    fn grok_results_become_compact_list() {
+        let raw = "```json\n[{\"title\":\"A\",\"url\":\"https://a.cn\",\"description\":\"甲\"},{\"title\":\"A\",\"url\":\"https://a.cn/\",\"description\":\"重复\"}]\n```";
+        assert_eq!(render_search("q", raw), "1. A\nhttps://a.cn\n甲");
+        assert_eq!(render_search("q", "不是 JSON"), "不是 JSON", "解析失败时截断原文兜底");
+        assert_eq!(render_search("q", "] 反序 ["), "] 反序 [", "括号反序不越界");
+    }
 }

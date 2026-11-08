@@ -31,30 +31,43 @@ pub enum AgentAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LearnCmd {
-    List,
-    Forget(i64),
+    /// 总览：说法与记忆的数量、待整理候选、最近一次整理
+    Overview,
+    /// 列出说法或记忆
+    List(LearnScope),
+    /// 删除一条：纯数字为说法编号，u3 / m2 为记忆条目
+    Forget(String),
     On,
     Off,
-    /// 立即对尚未学习的新消息执行一次学习
+    /// 立即学习尚未学过的新消息，并整理记忆候选
     Now,
+    /// 撤销最近一次记忆整理
+    Undo,
 }
 
-/// 命令表：名字、用法、说明。
-pub const COMMANDS: &[(&str, &str, &str)] = &[
-    ("help", "/help [命令]", "命令列表或单个命令说明"),
-    ("status", "/status", "模型、思考等级、上下文占用、缓存命中、内存、运行时长"),
-    ("new", "/new", "唐语歌开启新会话（记忆和关系不变，只是技术会话重开；旧会话标为已结束）"),
-    ("sessions", "/sessions", "查看唐语歌的当前与历史会话、后台任务数量和数据库大小"),
-    ("gc", "/gc [天数]", "清理早于 N 天（默认 30）的历史会话与已归档后台任务；当前会话、常驻专员与长期记忆不受影响"),
-    ("stop", "/stop", "停止唐语歌当前这一轮"),
-    ("compact", "/compact", "立即压缩当前会话"),
-    ("model", "/model [名称]", "查看或切换唐语歌的模型"),
-    ("effort", "/effort [等级]", "查看或切换唐语歌的思考等级（low/medium/high/xhigh/max）"),
-    ("learn", "/learn [list|forget <id>|on|off|now]", "表达与黑话学习：查看、删除条目、开关、立即学习"),
-    ("agents", "/agents", "列出后台任务与专员：编号、状态、模型、耗时、进度"),
-    ("agent", "/agent <编号> [stop|要说的话]", "查看某个后台任务；stop 停止；带一句话则续接或插话"),
-    ("provider", "/provider [类别 字段 值 | 类别 use 名字]", "查看或修改生图/语音/搜索/grok 提供方（如 /provider image model gpt-image-2）"),
-    ("reload", "/reload", "重新加载配置与 secret 文件"),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LearnScope {
+    Expressions,
+    Memory,
+}
+
+/// 命令表：名字、用法、一句话说明（/help 列表用）、详细说明（/help 命令名 用）。
+/// QQ 单聊只显示纯文本、手机一行约 20 字，说明尽量短，详细内容按需查看。
+pub const COMMANDS: &[(&str, &str, &str, &str)] = &[
+    ("help", "/help [命令]", "命令列表", "不带参数列出全部命令；带命令名查看它的详细用法。"),
+    ("status", "/status", "运行状态", "版本、模型与思考等级、上下文占用、缓存命中、后台任务、内存与运行时长。"),
+    ("new", "/new", "开新会话", "唐语歌开启新会话：记忆和关系不变，只是技术上的会话重开；旧会话标为已结束。"),
+    ("sessions", "/sessions", "会话与数据库", "唐语歌最近的会话、各类会话数量、记录条数与数据库大小。"),
+    ("gc", "/gc [天数]", "清理历史会话", "删除已结束且超过 N 天（默认 30）没有活动的会话与已归档后台任务。\n当前会话、常驻专员、长期记忆、还有未转达汇报的会话不受影响。\n/gc 0 清理全部已结束的会话。"),
+    ("stop", "/stop", "停止当前回复", "停止唐语歌正在进行的这一轮。"),
+    ("compact", "/compact", "压缩当前会话", "立即压缩当前会话：先折叠较早的工具结果，不够再生成摘要。"),
+    ("model", "/model [名称]", "查看或切换模型", "不带参数查看当前模型与可选模型；带名称切换唐语歌的模型。"),
+    ("effort", "/effort [等级]", "查看或切换思考等级", "等级可选 low / medium / high / xhigh / max。"),
+    ("learn", "/learn [子命令]", "学习与记忆", "/learn　查看总览\n/learn list 说法 或 /learn list 记忆\n/learn forget 12（说法编号）或 u3 / m2（记忆编号）\n/learn now 立即学习并整理\n/learn undo 撤销最近一次整理\n/learn on 或 off 开关学习"),
+    ("agents", "/agents", "后台任务列表", "列出后台任务与常驻专员：编号、状态、模型、耗时、进度。"),
+    ("agent", "/agent <编号> [stop|话]", "查看、停止或续接", "/agent 12 查看详情与最近回复\n/agent 12 stop 停止\n/agent 12 再查一下日志：运行中则插话，已结束则续接"),
+    ("provider", "/provider [类别 字段 值]", "生图、语音、搜索、grok", "不带参数查看当前提供方。\n修改：/provider image model gpt-image-2\n切换：/provider image use 名字"),
+    ("reload", "/reload", "重载配置", "重新加载配置、secret 文件与人格资产。"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,13 +139,27 @@ fn parse_agent(arg: Option<&str>) -> Option<Command> {
 }
 
 fn parse_learn(arg: Option<&str>) -> Option<LearnCmd> {
-    let mut it = arg.unwrap_or("list").split_whitespace();
+    let Some(arg) = arg else { return Some(LearnCmd::Overview) };
+    let mut it = arg.split_whitespace();
     Some(match it.next()? {
-        "list" => LearnCmd::List,
+        "list" => match it.next() {
+            None | Some("说法" | "表达" | "expr") => LearnCmd::List(LearnScope::Expressions),
+            Some("记忆" | "memory" | "mem") => LearnCmd::List(LearnScope::Memory),
+            Some(_) => return None,
+        },
         "on" => LearnCmd::On,
         "off" => LearnCmd::Off,
         "now" => LearnCmd::Now,
-        "forget" => LearnCmd::Forget(it.next()?.parse().ok()?),
+        "undo" => LearnCmd::Undo,
+        "forget" => {
+            let id = it.next()?.trim_start_matches('#').to_ascii_lowercase();
+            let entry = id.strip_prefix('u').or_else(|| id.strip_prefix('m'));
+            let valid = id.parse::<i64>().is_ok() || entry.and_then(|n| n.parse::<usize>().ok()).is_some_and(|n| n > 0);
+            if !valid {
+                return None;
+            }
+            LearnCmd::Forget(id)
+        }
         _ => return None,
     })
 }
@@ -141,15 +168,16 @@ pub fn help(topic: Option<&str>) -> String {
     match topic.map(|t| t.trim_start_matches('/')) {
         Some(t) => COMMANDS
             .iter()
-            .find(|(n, _, _)| *n == t)
-            .map(|(_, u, d)| format!("{u}\n{d}"))
+            .find(|(n, _, _, _)| *n == t)
+            .map(|(_, u, _, d)| format!("{u}\n{d}"))
             .unwrap_or_else(|| format!("没有 /{t} 这个命令，发 /help 看全部")),
         None => {
-            let mut s = String::from("可用命令：\n");
-            for (_, u, d) in COMMANDS {
-                s.push_str(&format!("{u} — {d}\n"));
+            let mut s = String::from("【命令】\n");
+            for (n, _, short, _) in COMMANDS {
+                s.push_str(&format!("/{n}  {short}\n"));
             }
-            s.trim_end().to_owned()
+            s.push_str("\n发 /help 命令名 查看详细用法");
+            s
         }
     }
 }
@@ -178,15 +206,25 @@ mod tests {
         assert_eq!(parse("/gc 7"), Some(Ok(Command::Gc(Some(7)))));
         assert_eq!(parse("/gc"), Some(Ok(Command::Gc(None))));
         assert_eq!(parse("/gc x"), Some(Err(ParseError::BadArgs("gc".into()))));
-        assert_eq!(parse("/learn"), Some(Ok(Command::Learn(LearnCmd::List))));
-        assert_eq!(parse("/learn forget 12"), Some(Ok(Command::Learn(LearnCmd::Forget(12)))));
+        assert_eq!(parse("/learn"), Some(Ok(Command::Learn(LearnCmd::Overview))));
+        assert_eq!(parse("/learn list"), Some(Ok(Command::Learn(LearnCmd::List(LearnScope::Expressions)))));
+        assert_eq!(parse("/learn list 记忆"), Some(Ok(Command::Learn(LearnCmd::List(LearnScope::Memory)))));
+        assert_eq!(parse("/learn list 别的"), Some(Err(ParseError::BadArgs("learn".into()))));
+        assert_eq!(parse("/learn forget 12"), Some(Ok(Command::Learn(LearnCmd::Forget("12".into())))));
+        assert_eq!(parse("/learn forget #12"), Some(Ok(Command::Learn(LearnCmd::Forget("12".into())))));
+        assert_eq!(parse("/learn forget U3"), Some(Ok(Command::Learn(LearnCmd::Forget("u3".into())))));
+        assert_eq!(parse("/learn forget m0"), Some(Err(ParseError::BadArgs("learn".into()))));
         assert_eq!(parse("/learn forget x"), Some(Err(ParseError::BadArgs("learn".into()))));
+        for bad in ["/learn forget 猫1", "/learn forget u", "/learn forget 😀", "/learn forget u猫"] {
+            assert_eq!(parse(bad), Some(Err(ParseError::BadArgs("learn".into()))), "{bad}");
+        }
+        assert_eq!(parse("/learn undo"), Some(Ok(Command::Learn(LearnCmd::Undo))));
     }
 
     #[test]
     fn help_covers_every_command() {
         let h = help(None);
-        for (n, _, _) in COMMANDS {
+        for (n, _, _, _) in COMMANDS {
             assert!(h.contains(&format!("/{n}")));
             assert!(parse(&format!("/{n}")).is_some(), "表中的 /{n} 必须是已知命令");
         }

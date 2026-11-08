@@ -11,6 +11,7 @@ use futures_util::StreamExt;
 use qya_config::ProviderConfig;
 use qya_core::{ContentPart, Message, Role, ToolCall, Usage};
 use serde_json::{Value, json};
+use crate::media::{IMAGE_INLINE_MAX, Inline, VIDEO_INLINE_MAX, local_data_uri};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -42,7 +43,9 @@ impl ChatCompletionsProvider {
 
     fn encode(&self, req: &ChatRequest) -> Value {
         let mut messages: Vec<Value> = req.system.iter().map(|s| json!({"role": "system", "content": s})).collect();
-        messages.extend(req.messages.iter().map(encode_message));
+        // 按目标模型的模态能力编码媒体；未登记的模型按全支持处理，由接口自行报错
+        let caps = self.cfg.models.get(&req.model).map_or(Caps::ALL, |m| Caps { image: m.vision, video: m.video });
+        messages.extend(req.messages.iter().map(|m| encode_message(m, caps)));
         let mut body = json!({
             "model": req.model,
             "messages": messages,
@@ -185,9 +188,20 @@ impl Provider for ChatCompletionsProvider {
     }
 }
 
-fn encode_message(m: &Message) -> Value {
+/// 目标模型能直接接收的媒体类型。
+#[derive(Debug, Clone, Copy)]
+struct Caps {
+    image: bool,
+    video: bool,
+}
+
+impl Caps {
+    const ALL: Self = Self { image: true, video: true };
+}
+
+fn encode_message(m: &Message, caps: Caps) -> Value {
     match m.role {
-        Role::User => json!({"role": "user", "content": encode_content(&m.content)}),
+        Role::User => json!({"role": "user", "content": encode_content(&m.content, caps)}),
         Role::Tool => json!({
             "role": "tool",
             "tool_call_id": m.tool_call_id.as_deref().unwrap_or_default(),
@@ -214,44 +228,37 @@ fn encode_message(m: &Message) -> Value {
     }
 }
 
-fn encode_content(parts: &[ContentPart]) -> Value {
+fn encode_content(parts: &[ContentPart], caps: Caps) -> Value {
     if let [ContentPart::Text { text }] = parts {
         return Value::String(text.clone());
     }
+    let note = |t: String| json!({"type": "text", "text": t});
     parts
         .iter()
         .map(|p| match p {
             ContentPart::Text { text } => json!({"type": "text", "text": text}),
+            ContentPart::Image { .. } if !caps.image => note("〔这里有一张图片，当前模型看不了图片〕".into()),
             ContentPart::Image { url } => match url.strip_prefix("file://") {
-                Some(path) => match local_image_data_uri(path) {
-                    Some(data) => json!({"type": "image_url", "image_url": {"url": data}}),
-                    None => json!({"type": "text", "text": "〔这张图片的本地缓存已清理，看不到内容了〕"}),
+                Some(path) => match local_data_uri(path, IMAGE_INLINE_MAX) {
+                    Ok(data) => json!({"type": "image_url", "image_url": {"url": data}}),
+                    Err(_) => note("〔这张图片的本地缓存已清理，看不到内容了〕".into()),
                 },
                 None => json!({"type": "image_url", "image_url": {"url": url}}),
             },
-            // 视频片段格式待 QQ 媒体任务实测确认
-            ContentPart::Video { url } => json!({"type": "video_url", "video_url": {"url": url}}),
+            // 当前模型不支持视频：不发送画面，提示用 watch_video 工具（由支持视频的模型代看）
+            ContentPart::Video { url } if !caps.video => {
+                note(format!("〔这段视频没有直接发给你（当前模型不支持视频）；需要了解内容时用 watch_video 查看：{}〕", url.trim_start_matches("file://")))
+            }
+            ContentPart::Video { url } => match url.strip_prefix("file://") {
+                Some(path) => match local_data_uri(path, VIDEO_INLINE_MAX) {
+                    Ok(data) => json!({"type": "video_url", "video_url": {"url": data}}),
+                    Err(Inline::TooLarge) => note(format!("〔这段视频较大，没有直接发送；需要了解内容时用 watch_video 查看：{path}〕")),
+                    Err(Inline::Missing) => note("〔这段视频的本地缓存已清理，看不到内容了〕".into()),
+                },
+                None => json!({"type": "video_url", "video_url": {"url": url}}),
+            },
         })
         .collect()
-}
-
-/// 本地图片（会话里以 file:// 引用，避免 base64 进数据库）在请求时转为 data URI。
-fn local_image_data_uri(path: &str) -> Option<String> {
-    use base64::Engine;
-    const MAX: u64 = 10 * 1024 * 1024;
-    let meta = std::fs::metadata(path).ok()?;
-    if meta.len() > MAX {
-        return None;
-    }
-    let bytes = std::fs::read(path).ok()?;
-    let mime = match bytes.get(..4)? {
-        [0x89, b'P', b'N', b'G'] => "image/png",
-        [0xFF, 0xD8, ..] => "image/jpeg",
-        [b'G', b'I', b'F', _] => "image/gif",
-        [b'R', b'I', b'F', b'F'] => "image/webp",
-        _ => "image/jpeg",
-    };
-    Some(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(&bytes)))
 }
 
 /// SSE 增量累加器：负责把 delta 拼成完整消息。独立成结构便于离线测试。
@@ -421,10 +428,10 @@ mod tests {
     fn assistant_tool_call_gets_reasoning_pad() {
         let mut m = Message::with_parts(Role::Assistant, vec![]);
         m.tool_calls.push(ToolCall { id: "c".into(), name: "x".into(), arguments: "{}".into() });
-        let v = encode_message(&m);
+        let v = encode_message(&m, Caps::ALL);
         assert_eq!(v["reasoning_content"], " ");
         assert_eq!(v["content"], Value::Null);
-        let plain = encode_message(&Message::assistant("hi"));
+        let plain = encode_message(&Message::assistant("hi"), Caps::ALL);
         assert!(plain.get("reasoning_content").is_none());
     }
 
@@ -433,7 +440,7 @@ mod tests {
         let p = std::env::temp_dir().join(format!("qya-llm-img-{}.png", std::process::id()));
         std::fs::write(&p, b"\x89PNG\r\n\x1a\nrest").unwrap();
         let m = Message::with_parts(Role::User, vec![ContentPart::Image { url: format!("file://{}", p.display()) }, ContentPart::Image { url: "file:///nope/x.jpg".into() }]);
-        let v = encode_message(&m);
+        let v = encode_message(&m, Caps::ALL);
         assert!(v["content"][0]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
         assert_eq!(v["content"][1]["type"], "text");
     }
@@ -441,8 +448,26 @@ mod tests {
     #[test]
     fn user_multimodal_content() {
         let m = Message::with_parts(Role::User, vec![ContentPart::text("看"), ContentPart::Image { url: "data:image/png;base64,AA".into() }]);
-        let v = encode_message(&m);
+        let v = encode_message(&m, Caps::ALL);
         assert_eq!(v["content"][1]["type"], "image_url");
-        assert_eq!(encode_message(&Message::user("hi"))["content"], "hi");
+        assert_eq!(encode_message(&Message::user("hi"), Caps::ALL)["content"], "hi");
+    }
+
+    #[test]
+    fn media_follows_model_capabilities() {
+        let m = Message::with_parts(
+            Role::User,
+            vec![ContentPart::text("看看"), ContentPart::Video { url: "file:///m/inbox/a.mp4".into() }],
+        );
+        // 不支持视频：不发画面，提示用 watch_video 并给出路径
+        let v = encode_message(&m, Caps { image: true, video: false });
+        let note = v["content"][1]["text"].as_str().unwrap();
+        assert!(note.contains("watch_video") && note.contains("/m/inbox/a.mp4"), "{note}");
+        // 支持视频但本地文件已清理：如实说明
+        let v = encode_message(&m, Caps::ALL);
+        assert!(v["content"][1]["text"].as_str().unwrap().contains("已清理"));
+        // 远程地址原样发送
+        let remote = Message::with_parts(Role::User, vec![ContentPart::text("x"), ContentPart::Video { url: "https://v/1.mp4".into() }]);
+        assert_eq!(encode_message(&remote, Caps::ALL)["content"][1]["video_url"]["url"], "https://v/1.mp4");
     }
 }

@@ -29,7 +29,7 @@ macro_rules! str_enum {
 
 str_enum!(SessionKind { Persona => "persona", Worker => "worker", Specialist => "specialist" });
 str_enum!(SessionStatus { Active => "active", Archived => "archived", Closed => "closed" });
-str_enum!(EntryKind { Message => "message", Compaction => "compaction" });
+str_enum!(EntryKind { Message => "message", Compaction => "compaction", Fold => "fold" });
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionRow {
