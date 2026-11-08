@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Fetch mailbox data and perform constrained mail actions from Hermes.
+"""Fetch mailbox data and perform constrained mail actions for LyraBot.
 
 连接参数不写在这里。本仓库是公开的，主机、端口、SSH 用户和私钥路径都从服务器
 本地的 ``mail_vps.toml`` 读取，查找顺序：
 
-1. ``$HERMES_MAIL_VPS_CONFIG``
-2. ``$HERMES_HOME/mail_vps.toml``
-3. ``~/.hermes/mail_vps.toml``
+1. ``$QYA_MAIL_VPS_CONFIG``（qya 调用时总会设置）
+2. ``~/.config/qya/mail_vps.toml``（手动调试用）
 
 配置缺失或不完整时返回结构化错误，不回退到任何内置默认地址。
 """
@@ -46,12 +45,10 @@ class ConfigError(Exception):
 
 
 def _config_path() -> Path:
-    override = os.environ.get("HERMES_MAIL_VPS_CONFIG", "").strip()
+    override = os.environ.get("QYA_MAIL_VPS_CONFIG", "").strip()
     if override:
         return Path(override).expanduser()
-    home = os.environ.get("HERMES_HOME", "").strip()
-    base = Path(home).expanduser() if home else Path.home() / ".hermes"
-    return base / "mail_vps.toml"
+    return Path.home() / ".config" / "qya" / "mail_vps.toml"
 
 
 def _load_config() -> dict:

@@ -11,3 +11,4 @@ target/
 # local dev
 qya.toml
 data/
+.serena/

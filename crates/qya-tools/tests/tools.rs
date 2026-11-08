@@ -54,6 +54,17 @@ async fn shell_runs_truncates_and_audits() {
 }
 
 #[tokio::test]
+async fn shell_large_output_does_not_deadlock() {
+    // 输出远超管道容量（约 64 KB）：读取必须与等待并发，否则会一直卡到超时
+    let d = tmp("bigout");
+    let started = Instant::now();
+    let out = shell(&d).call(ctx(), json!({"command": "yes x | head -c 3000000; echo END", "timeout_s": 20})).await;
+    assert!(!out.is_error, "{}", out.text);
+    assert!(out.text.contains("END"), "{}", &out.text[out.text.len().saturating_sub(200)..]);
+    assert!(started.elapsed().as_secs() < 15, "不应等到超时");
+}
+
+#[tokio::test]
 async fn shell_timeout_kills() {
     let d = tmp("timeout");
     let started = Instant::now();

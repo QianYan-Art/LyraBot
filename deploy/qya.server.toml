@@ -130,7 +130,7 @@ key_file = "secrets/grok.key"
 model = "grok-chat-fast"
 timeout_s = 120
 
-# QQ 官方机器人（docs/01-architecture.md 9.1）；部署时从 Hermes 的 QQ_APP_ID / QQ_CLIENT_SECRET / QQ_ALLOWED_USERS 迁移
+# QQ 官方机器人（docs/01-architecture.md 9.1）；secret 放 secrets/qq.secret，allowed_users 填主人的 user_openid
 [platforms.qq]
 app_id = "__QQ_APP_ID__"
 secret_file = "secrets/qq.secret"

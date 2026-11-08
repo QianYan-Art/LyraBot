@@ -450,13 +450,22 @@ pub trait Platform: Send + Sync {
 - 观测：`/status` 汇总；tracing 记录每轮 token、缓存命中、耗时、工具耗时。
 - 基准：任务 15 在服务器上测量空闲 RSS、单轮延迟开销（不含模型时间），写入运维文档。
 
+**稳定性修复（2026-11-08，依据 codex 静态审阅逐条核实）**：
+- 内核：压缩被打断时与生成被打断同样经 `unconsumed` 交回输入，压缩自身失败只告警、不终止本轮；工具调用预算在执行前检查，超出的调用补“未执行”结果；取消时给工具 2 秒自行收尾，不直接丢弃 future。
+- 运行时：人格一轮放在独立任务里执行，panic 也会回到 `finish_turn` 复位阶段；内核队列里未注入的插话在被打断时并回缓冲，`/stop` 时一并丢弃；GC 保留排队或运行中的执行者，每周自动清理还要求没有后台任务。
+- 子进程：stdout/stderr 与等待并发读取（每路最多保留 4 MB，其余读走丢弃），避免大输出写满管道卡到超时；future 被丢弃时由守卫终止整个进程组。
+- 模型：错误正文读取有期限并响应取消；SSE 未换行残余上限 8 MB，工具调用索引上限 128。
+- QQ：连接 20 秒、Hello 30 秒期限；心跳连续两次未收到 ACK 即重连；拒收事件同时清除旧事件锚点；延迟队列上限 50 条，补发失败放回队列；`allowed_users` 必须恰好一个（单用户设计）。
+- 抖音：响应缺字段不再 panic；发码请求被取消时守卫复位收码状态；发码结果非 ready 时报告失败而不是“已请求发码”。
+- 未采纳或推迟：模型 shell 与抖音 socket 的权限隔离（运行用户本就有免密 sudo，隔离需要另设执行用户，属架构调整）；SQLite 读写分离与维护调度、按压缩点裁剪历史读取、QQ 补发移出网关循环、附件下载并发与大小限制、主动额度原子计数（当前发送基本串行）。
+
 ## 13. 构建与部署
 
 - 本地：`cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.36`（目标机 Debian 13，glibc 新于 2.36），产物 scp 到 `/opt/qya/bin/qya.new`，原子替换后 `systemctl restart qya`。
 - 运行用户 `tangyuge`（2026-11-08 由 qya 更名，阿颜要求），加入 `blogsync`、`tangyuge-douyin` 组；邮件 SSH key 与 Komari 配置在 `/etc/qya/secrets/`。抖音服务为 `tangyuge-douyin`，源码在 `ops/douyin/`。布局与更新步骤见 `deploy/README.md`。
 - 回滚：保留上一版二进制 `qya.prev`。Hermes 已于 2026-11-08 完全移除，不再能回滚到 Hermes。
 
-**实现（任务 15、16，2026-11-08）**：本机 scoop 安装 zig、cargo install cargo-zigbuild，产物 10.6 MB；`deploy/install.sh` 完成用户、目录、凭据迁移（除 kimi/元宝外均在服务器内部从 Hermes 复制）、数据迁移与 systemd 单元。与原设计的差异：日志直接进 journald（不另写 /var/log 轮转文件，审计日志仍在 `/var/log/qya/audit.jsonl`）；单元为 `Type=simple`，未实现 sd_notify 看门狗（以 Restart=always 兜底，记为待办）；`MemoryMax=400M` 仅作失控保护。实测：`--check` 通过，19 个工具注册；切换后 QQ 网关 READY，常驻内存 28 MB；qya 用户可直连抖音 socket（status、list 正常）；运维专员在服务器上列出 12 个邮箱并生成流量日报。
+**实现（任务 15、16，2026-11-08）**：本机 scoop 安装 zig、cargo install cargo-zigbuild，产物 10.6 MB；`deploy/install.sh` 完成用户、目录、凭据迁移（除 kimi/元宝外均在服务器内部从 Hermes 复制）、数据迁移与 systemd 单元（Hermes 移除后迁移步骤已删去，现在的脚本只安装暂存目录给出的凭据）。与原设计的差异：日志直接进 journald（不另写 /var/log 轮转文件，审计日志仍在 `/var/log/qya/audit.jsonl`）；单元为 `Type=simple`，未实现 sd_notify 看门狗（以 Restart=always 兜底，记为待办）；`MemoryMax=400M` 仅作失控保护。实测：`--check` 通过，19 个工具注册；切换后 QQ 网关 READY，常驻内存 28 MB；qya 用户可直连抖音 socket（status、list 正常）；运维专员在服务器上列出 12 个邮箱并生成流量日报。
 
 ## 14. 调试与协作约定
 

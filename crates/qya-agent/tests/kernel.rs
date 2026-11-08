@@ -180,7 +180,7 @@ async fn follow_up_runs_after_stop() {
 
 #[tokio::test]
 async fn cancel_during_tool_keeps_structure_valid() {
-    let t = Sleepy::new("slow", 5_000, Concurrency::Exclusive);
+    let t = Sleepy::new("slow", 10_000, Concurrency::Exclusive); // 不响应取消，超过宽限期
     let p = Fake::new(vec![calls(vec![call("1", "slow", "{}"), call("2", "slow", "{}")])]);
     let (k, spec, sid) = setup(p, vec![Arc::new(t)], 100_000).await;
     let cancel = CancellationToken::new();
@@ -285,4 +285,69 @@ async fn cancel_before_reply_returns_unconsumed_inputs() {
     assert_eq!(out.reason, StopReason::Cancelled);
     assert_eq!(out.unconsumed.iter().map(Message::text).collect::<Vec<_>>(), vec!["一", "二"]);
     assert!(k.store().branch(sid).await.unwrap().is_empty(), "未得到回应的输入不落库");
+}
+
+#[tokio::test]
+async fn tool_budget_checked_before_execution() {
+    let t = Sleepy::new("t", 1, Concurrency::Shared);
+    let live = t.peak.clone();
+    let many: Vec<ToolCall> = (0..45).map(|i| call(&i.to_string(), "t", &format!(r#"{{"i":{i}}}"#))).collect();
+    let p = Fake::new(vec![calls(many), Message::assistant("不应到达")]);
+    let (k, spec, sid) = setup(p.clone(), vec![Arc::new(t)], 100_000).await;
+    let out = k.run_turn(&spec, sid, go(), &Queues::default(), CancellationToken::new()).await.unwrap();
+    assert_eq!(out.reason, StopReason::LoopGuard);
+    assert!(live.load(Ordering::SeqCst) <= 40);
+    let msgs: Vec<Message> =
+        k.store().branch(sid).await.unwrap().iter().map(|e| serde_json::from_value(e.payload.clone()).unwrap()).collect();
+    let results: Vec<&Message> = msgs.iter().filter(|m| m.role == Role::Tool).collect();
+    assert_eq!(results.len(), 45, "每个调用都要有结果");
+    assert_eq!(results.iter().filter(|m| m.is_error && m.text().contains("超过本轮工具调用上限")).count(), 5);
+}
+
+/// 流式正常、压缩（complete）时阻塞直到取消。
+struct SlowCompact(Arc<Fake>);
+#[async_trait]
+impl Provider for SlowCompact {
+    fn id(&self) -> &str {
+        "slow-compact"
+    }
+    async fn stream(&self, req: ChatRequest, c: CancellationToken) -> Result<EventRx, LlmError> {
+        if req.tools.is_empty() && req.system.first().is_some_and(|s| s.contains("压缩")) {
+            c.cancelled().await;
+            return Err(LlmError::new(qya_llm::ErrorKind::Cancelled, "cancel"));
+        }
+        self.0.stream(req, c).await
+    }
+    async fn list_models(&self) -> Result<Vec<RemoteModel>, LlmError> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn cancel_during_compaction_returns_unconsumed_inputs() {
+    let p = Fake::new(vec![Message::assistant("一"), Message::assistant("二")]);
+    let (k, mut spec, sid) = setup(p.clone(), vec![], 100_000).await;
+    let q = Queues::default();
+    k.run_turn(&spec, sid, vec![Message::user("甲".repeat(200))], &q, CancellationToken::new()).await.unwrap();
+    k.run_turn(&spec, sid, vec![Message::user("乙".repeat(200))], &q, CancellationToken::new()).await.unwrap();
+    spec.context_window = 300;
+    spec.provider = Arc::new(SlowCompact(p));
+    let cancel = CancellationToken::new();
+    let c2 = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        c2.cancel();
+    });
+    let out = k.run_turn(&spec, sid, vec![Message::user("丙")], &q, cancel).await.unwrap();
+    assert_eq!(out.reason, StopReason::Cancelled);
+    assert_eq!(out.unconsumed.iter().map(Message::text).collect::<Vec<_>>(), vec!["丙"]);
+}
+
+#[test]
+fn queues_take_all_drains_both() {
+    let q = Queues::default();
+    q.steer(Message::user("插话"));
+    q.follow_up(Message::user("追问"));
+    assert_eq!(q.take_all().iter().map(Message::text).collect::<Vec<_>>(), vec!["插话", "追问"]);
+    assert_eq!(q.pending(), 0);
 }

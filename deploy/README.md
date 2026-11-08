@@ -10,7 +10,7 @@
 | `/etc/qya/secrets/` | kimi、元宝、生图、grok、QQ、Komari、邮件 SSH key 与配置 | tangyuge 600 |
 | `/var/lib/qya/` | 运行用户家目录；数据库、记忆、表情包、媒体、工作目录、制作目录 `workspace/starlibrary_covers` | tangyuge |
 | `/etc/systemd/system/qya.service` | `qya --qq`，User=tangyuge，Restart=always，日志进 journald | root |
-| `/etc/sudoers.d/tangyuge` | `tangyuge ALL=(ALL) NOPASSWD: ALL`（沿用原 Hermes 的权限级别） | root 440 |
+| `/etc/sudoers.d/tangyuge` | `tangyuge ALL=(ALL) NOPASSWD: ALL` | root 440 |
 | `/usr/local/bin/rtk` | RTK | root |
 | `/opt/tangyuge-douyin`、`/var/lib/tangyuge-douyin`、`/run/tangyuge-douyin/login.sock` | 抖音服务（`tangyuge-douyin.service`，运行用户 douyin-runner，源码同步在本仓库 `ops/douyin/`） | douyin-runner |
 | `/etc/tangyuge-douyin.env` | `DOUYIN_ALLOWED_UID`（tangyuge 的 UID 997）、`DOUYIN_GATEWAY_UNIT=qya.service`、`DOUYIN_EXPECTED_ACCOUNT` | root 600 |
@@ -21,7 +21,7 @@
 
 ## 首次安装
 
-本机：`cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.36 -p qya`，把二进制、`assets/{persona,agents,tools,memory_seed}`、`skills/`、`deploy/{qya.service,qya.server.toml,install.sh}` 与 `secrets/{kimi.key,yuanbao.key}` 放进暂存目录上传，root 执行 `install.sh <暂存目录>` 后删除暂存目录。脚本可重复执行，不覆盖已存在的配置、凭据、记忆和数据；从 Hermes 迁移的步骤在 Hermes 不存在时自动跳过。
+本机：`cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.36 -p qya`，把二进制、`assets/{persona,agents,tools,memory_seed}`、`skills/`、`deploy/{qya.service,qya.server.toml,install.sh}` 与 `secrets/`（文件名对应 `qya.server.toml` 中的 `*_file`，如 `kimi.key`、`yuanbao.key`、`qq.secret`）放进暂存目录上传，root 执行 `QYA_QQ_APP_ID=<AppID> QYA_QQ_OWNER=<user_openid> install.sh <暂存目录>` 后删除暂存目录。需先部署抖音服务（提供 `tangyuge-douyin` 组）并存在 `blogsync` 组。脚本可重复执行：程序与资产每次覆盖，暂存目录里给出的凭据同名覆盖，配置与记忆只在不存在时生成。邮件 helper 的配置格式见 `assets/tools/mail_vps.example.toml`，SSH 主机指纹放 `/var/lib/qya/.ssh/known_hosts`。
 
 ## 统一基线（本地 = GitHub = 服务器）
 
@@ -49,4 +49,5 @@ ssh root@<server> 'chmod 755 /opt/qya/bin/qya.new && cp -a /opt/qya/bin/qya /opt
 
 - 2026-11-08 01:36（北京时间）切换：抖音服务 gateway 单元名改为可配置并设为 `qya.service`、允许 UID 改为运行用户、博客代理 key 属主改为运行用户，停用 hermes-gateway，启用 qya.service。
 - 2026-11-08 08:58：抖音账号改过抖音号后，`DOUYIN_EXPECTED_ACCOUNT` 同步更新后状态为 logged_in。以后再改抖音号时同样要改 `/etc/tangyuge-douyin.env` 并重启 tangyuge-douyin。需要人工操作浏览器时：root 执行 `python3 /opt/tangyuge-douyin/manual_window.py open`，本机 `ssh -N -L 16085:127.0.0.1:6085 root@<server>` 后打开 `http://127.0.0.1:16085/vnc.html`；浏览器空闲 180 秒会关闭（黑屏），需持续发送 status 保活。
-- 2026-11-08 03:22 改名：运行用户 qya → tangyuge（UID 不变）；hermes-douyin → tangyuge-douyin（单元、目录、用户组、环境文件、代码中的路径常量；删除 Hermes 安装器 install.py）。脚本见 `deploy/rename-tangyuge.sh`。
+- 2026-11-08 03:22 改名：运行用户 qya → tangyuge（UID 不变）；hermes-douyin → tangyuge-douyin（单元、目录、用户组、环境文件、代码中的路径常量；删除 Hermes 安装器 install.py）。一次性改名脚本已执行并从仓库移除，见提交 `690520d` 中的 `deploy/rename-tangyuge.sh`。首次安装时从 Hermes 迁移凭据与数据的步骤同样已从 `install.sh` 移除。
+- 2026-11-08：清理残留——邮件 helper 配置环境变量 `HERMES_MAIL_VPS_CONFIG` 改为 `QYA_MAIL_VPS_CONFIG`；删除服务器 `/tmp` 中 Hermes 时期的上传暂存、测试目录与 `/root` 下引用 hermes_cli 的检查脚本；博客目录中两个仍属原 hermes UID 的文件改为 `root:blogsync`（与其余文章一致）；博客同步脚本注释去掉 hermes。

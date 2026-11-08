@@ -10,7 +10,7 @@ use qya_llm::{ChatRequest, ErrorKind, LlmError, Provider, StreamEvent};
 use qya_store::{EntryKind, Store};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
@@ -76,6 +76,12 @@ impl Queues {
     }
     fn drain(q: &Mutex<VecDeque<Message>>) -> Vec<Message> {
         q.lock().expect("队列锁中毒").drain(..).collect()
+    }
+    /// 取出两个队列中尚未处理的全部消息（插话在前）。用于被打断的一轮把它们并回缓冲。
+    pub fn take_all(&self) -> Vec<Message> {
+        let mut v = Self::drain(&self.steer);
+        v.extend(Self::drain(&self.follow_up));
+        v
     }
     pub fn pending(&self) -> usize {
         self.steer.lock().map(|q| q.len()).unwrap_or(0) + self.follow_up.lock().map(|q| q.len()).unwrap_or(0)
@@ -162,10 +168,15 @@ impl Kernel {
             let mut ctx = self.context(session).await?;
             let est = context::estimate_messages(&ctx).max(last_prompt_tokens)
                 + unpersisted.iter().map(|m| context::estimate_tokens(m.char_len())).sum::<u64>();
-            if (est as f64) >= spec.context_window as f64 * self.cfg.compaction_ratio
-                && self.compact(spec, session, &ctx, est, &cancel).await?
-            {
-                ctx = self.context(session).await?;
+            if (est as f64) >= spec.context_window as f64 * self.cfg.compaction_ratio {
+                match self.compact(spec, session, &ctx, est, &cancel).await {
+                    Ok(true) => ctx = self.context(session).await?,
+                    Ok(false) => {}
+                    // 压缩被打断：与生成被打断同样处理，未落库的输入经 unconsumed 交回
+                    Err(_) if cancel.is_cancelled() => break StopReason::Cancelled,
+                    // 压缩本身失败不终止本轮，按原上下文继续（超长时由模型请求报错并保存输入）
+                    Err(e) => tracing::warn!(session, error = %e, "会话压缩失败，本轮跳过压缩"),
+                }
             }
             ctx.extend(unpersisted.iter().cloned().map(|message| CtxMessage { entry: None, message }));
 
@@ -217,9 +228,13 @@ impl Kernel {
             let sig: String = assistant.tool_calls.iter().map(|c| format!("{}:{}", c.name, c.arguments)).collect::<Vec<_>>().join("|");
             repeats = if last_sig.as_deref() == Some(sig.as_str()) { repeats + 1 } else { 1 };
             last_sig = Some(sig);
+            // 执行前按剩余预算截断：超出部分不执行，但仍补上结果以保持工具消息结构完整
+            let budget = self.cfg.max_tool_calls.saturating_sub(total_calls) as usize;
+            let run_n = assistant.tool_calls.len().min(budget);
             total_calls += assistant.tool_calls.len() as u32;
 
-            let results = self.exec_tools(spec, session, &assistant.tool_calls, &cancel).await;
+            let mut results = self.exec_tools(spec, session, &assistant.tool_calls[..run_n], &cancel).await;
+            results.extend((run_n..assistant.tool_calls.len()).map(|_| ToolOutput::err("未执行：超过本轮工具调用上限")));
             for (call, out) in assistant.tool_calls.iter().zip(results) {
                 media.extend(out.media);
                 self.persist(session, &Message::tool_result(&call.id, out.text, out.is_error)).await?;
@@ -299,9 +314,15 @@ impl Kernel {
         self.emit(AgentEvent::ToolStart { session, call_id: call.id.clone(), name: call.name.clone() });
         let started = Instant::now();
         let ctx = ToolCtx { session, call_id: call.id.clone(), cancel: cancel.child_token() };
+        let fut = tool.call(ctx, args);
+        tokio::pin!(fut);
         let out = tokio::select! {
-            o = tool.call(ctx, args) => o,
-            _ = cancel.cancelled() => ToolOutput::err("已取消"),
+            o = &mut fut => o,
+            // 工具持有子令牌会自行收尾（如终止进程组）；等它最多 2 秒，避免直接丢弃 future 跳过清理
+            _ = cancel.cancelled() => match tokio::time::timeout(Duration::from_secs(2), &mut fut).await {
+                Ok(o) => o,
+                Err(_) => ToolOutput::err("已取消"),
+            },
         };
         self.emit(AgentEvent::ToolEnd {
             session,

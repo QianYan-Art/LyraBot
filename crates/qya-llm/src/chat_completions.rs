@@ -17,6 +17,11 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_ATTEMPTS: u32 = 3;
 
+/// SSE 未换行残余的上限（正常单行远小于此）。
+const MAX_SSE_LINE: usize = 8 * 1024 * 1024;
+/// 单条回复内工具调用索引上限。
+const MAX_TOOL_CALLS_PER_MESSAGE: usize = 128;
+
 pub struct ChatCompletionsProvider {
     cfg: ProviderConfig,
     http: reqwest::Client,
@@ -82,7 +87,11 @@ impl ChatCompletionsProvider {
                         .and_then(|v| v.to_str().ok())
                         .and_then(|v| v.trim().parse::<u64>().ok())
                         .map(Duration::from_secs);
-                    let text = resp.text().await.unwrap_or_default();
+                    // 错误正文也要有期限并响应取消：上游可能只发响应头、正文迟迟不结束
+                    let text = tokio::select! {
+                        _ = cancel.cancelled() => return Err(LlmError::new(ErrorKind::Cancelled, "已取消")),
+                        r = tokio::time::timeout(Duration::from_secs(self.cfg.timeouts.first_byte_s), resp.text()) => r.ok().and_then(|t| t.ok()).unwrap_or_default(),
+                    };
                     LlmError::from_status(status, &text, retry_after)
                 }
             };
@@ -132,6 +141,10 @@ impl Provider for ChatCompletionsProvider {
                     Ok(Some(Ok(c))) => c,
                 };
                 buf.extend_from_slice(&chunk);
+                if buf.len() > MAX_SSE_LINE {
+                    let _ = tx.send(Err(LlmError::new(ErrorKind::Transient, "流式响应单行过长，已中止"))).await;
+                    return;
+                }
                 // 按行切分 SSE；只处理完整行，残余留到下一个分块
                 while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                     let line: Vec<u8> = buf.drain(..=pos).collect();
@@ -287,6 +300,9 @@ impl Accumulator {
             if let Some(calls) = d.get("tool_calls").and_then(Value::as_array) {
                 for c in calls {
                     let idx = c.get("index").and_then(Value::as_u64).unwrap_or(self.calls.len() as u64) as usize;
+                    if idx >= MAX_TOOL_CALLS_PER_MESSAGE {
+                        continue; // 异常索引直接忽略，避免按索引无界扩容
+                    }
                     while self.calls.len() <= idx {
                         self.calls.push(ToolCall { id: String::new(), name: String::new(), arguments: String::new() });
                     }

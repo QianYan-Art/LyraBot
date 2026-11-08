@@ -187,7 +187,7 @@ impl Tool for Mail {
         };
         let mut full = vec![self.cfg.helper.display().to_string()];
         full.extend(argv.iter().cloned());
-        let env = vec![("HERMES_MAIL_VPS_CONFIG".to_owned(), self.cfg.config.display().to_string())];
+        let env = vec![("QYA_MAIL_VPS_CONFIG".to_owned(), self.cfg.config.display().to_string())];
         let res = exec(&self.cfg.python, &full, None, &env, Duration::from_secs(180), &ctx.cancel).await;
         self.audit
             .record(json!({"ts": now_ms(), "session": ctx.session, "tool": "mail", "action": args["action"], "write": write,

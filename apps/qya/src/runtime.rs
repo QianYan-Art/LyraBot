@@ -344,7 +344,7 @@ impl Runtime {
                     let _ = self.store.kv_set(KEY, &now.to_string()).await;
                     continue;
                 };
-                if now - last < WEEK_MS || self.state().phase != Phase::Idle {
+                if now - last < WEEK_MS || self.state().phase != Phase::Idle || self.sup.running() > 0 {
                     continue;
                 }
                 let days = self.cfg.get().agent.gc_days;
@@ -358,7 +358,9 @@ impl Runtime {
     }
 
     async fn gc(&self, days: u32) -> Result<String> {
-        let keep = vec![self.session()];
+        // 排队或运行中的执行者（包括刚被续接、数据库里仍是 archived 的）不能被清理
+        let mut keep = vec![self.session()];
+        keep.extend(self.sup.active_ids());
         let r = self.store.gc_sessions(days, keep).await?;
         self.sup.forget(&r.deleted_ids);
         let mb = |b: i64| b as f64 / 1048576.0;
@@ -531,7 +533,12 @@ impl Runtime {
                 st.running = Some(c.clone());
                 (std::mem::take(&mut st.pending), std::mem::take(&mut st.relay_media), c)
             };
-            let result = self.run_persona_turn(inputs, cancel).await;
+            // 单独的任务里跑：即使本轮 panic，也能回到 finish_turn 复位状态，而不是永远卡在“回复中”
+            let me = self.clone();
+            let result = match tokio::spawn(async move { me.run_persona_turn(inputs, cancel).await }).await {
+                Ok(r) => r,
+                Err(e) => Err(anyhow::anyhow!("本轮异常中止：{e}")),
+            };
             self.finish_turn(result, media).await;
         });
     }
@@ -543,11 +550,14 @@ impl Runtime {
             st.phase = Phase::Delivering;
             st.running = None;
             let discard = std::mem::take(&mut st.discard_unconsumed);
+            // 内核队列里还没来得及注入的插话/追问：被打断时并回缓冲，/stop 时一并丢弃
+            let mut leftover = self.queues.take_all();
             match &mut result {
                 // 被打断的一轮不投递：未得到回应的输入排回缓冲最前面，后台媒体留给下一轮
                 Ok(o) if o.reason == StopReason::Cancelled => {
-                    if !discard && !o.unconsumed.is_empty() {
+                    if !discard {
                         let mut merged = std::mem::take(&mut o.unconsumed);
+                        merged.append(&mut leftover);
                         merged.append(&mut st.pending);
                         st.pending = merged;
                     }
@@ -555,6 +565,11 @@ impl Runtime {
                 }
                 Ok(o) => o.media.extend(relay_media),
                 Err(_) => st.relay_media.extend(relay_media),
+            }
+            // 正常结束后才到达队列的消息（错过了最后一次检查）排在缓冲最前，下一轮处理
+            if !discard && !leftover.is_empty() {
+                leftover.append(&mut st.pending);
+                st.pending = leftover;
             }
             if let Ok(o) = &result {
                 st.last_usage = o.usage;

@@ -588,8 +588,9 @@ impl Config {
         let qq = match raw.platforms.qq {
             None => None,
             Some(q) => {
-                if q.allowed_users.is_empty() {
-                    return Err(ConfigError::Invalid("platforms.qq.allowed_users 不能为空（只服务阿颜）".into()));
+                // 会话、回复锚点与收件人都是单用户设计，多人会串话，因此必须恰好一个
+                if q.allowed_users.len() != 1 {
+                    return Err(ConfigError::Invalid("platforms.qq.allowed_users 必须恰好包含一个 user_openid（单用户设计）".into()));
                 }
                 let secret = read_secret_line(&resolve(&q.secret_file))?;
                 Some(QqConfig {

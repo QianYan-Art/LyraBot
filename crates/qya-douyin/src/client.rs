@@ -109,14 +109,14 @@ impl Client {
 pub fn validate_content(v: &Value, action: &str) -> Result<(), String> {
     let m = v.as_object().ok_or("内容响应不是对象")?;
     if m.keys().any(|k| !CONTENT_ROOT_FIELDS.contains(&k.as_str()))
-        || !m["ok"].is_boolean()
+        || !m.get("ok").is_some_and(Value::is_boolean)
         || !m.get("state").and_then(Value::as_str).is_some_and(|s| CONTENT_STATES.contains(&s))
         || !m.get("message").is_some_and(Value::is_string)
     {
         return Err("内容响应结构无效".into());
     }
     if let Some(vs) = m.get("verification_submitted")
-        && (action != "verification_submit" || vs != &Value::Bool(true) || m["state"] != "in_progress")
+        && (action != "verification_submit" || vs != &Value::Bool(true) || m.get("state").and_then(Value::as_str) != Some("in_progress"))
     {
         return Err("验证码提交回执无效".into());
     }
@@ -172,5 +172,8 @@ mod tests {
         assert!(validate_content(&json!({"ok": true, "state": "in_progress", "message": "x", "verification_submitted": true}), "job").is_err());
         assert!(validate_content(&json!({"ok": true, "state": "ready", "message": "x", "total": 5, "next_offset": 3}), "cover_library").is_ok());
         assert!(validate_content(&json!({"ok": true, "state": "ready", "message": "x", "total": 5, "next_offset": 9}), "cover_library").is_err());
+        // 缺少必需字段时返回错误而不是 panic
+        assert!(validate_content(&json!({}), "list").is_err());
+        assert!(validate_content(&json!({"state": "ready", "message": "x"}), "list").is_err());
     }
 }

@@ -113,14 +113,12 @@ pub async fn exec(
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn()?;
     let pid = child.id();
-    let mut stdout = child.stdout.take().expect("stdout piped");
-    let mut stderr = child.stderr.take().expect("stderr piped");
-    let reader = async move {
-        let (mut o, mut e) = (Vec::new(), Vec::new());
-        let _ = tokio::join!(stdout.read_to_end(&mut o), stderr.read_to_end(&mut e));
-        (o, e)
-    };
-    tokio::pin!(reader);
+    // future 被丢弃（例如外层取消）时也要终止整个进程组；kill_on_drop 只管直接子进程
+    let mut group = GroupGuard(pid);
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    // 读取与等待并发进行：否则输出超过管道容量时子进程写阻塞、永远等不到退出
+    let reader = tokio::spawn(async move { tokio::join!(read_capped(stdout, MAX_CAPTURE), read_capped(stderr, MAX_CAPTURE)) });
     let (mut timed_out, mut cancelled) = (false, false);
     let status = tokio::select! {
         s = child.wait() => Some(s?),
@@ -131,8 +129,16 @@ pub async fn exec(
         kill_group(pid).await;
         let _ = child.kill().await;
     }
+    group.0 = None;
     // 进程结束后管道会关闭；给读取留一点时间，避免孙进程持有管道导致挂起
-    let (o, e) = tokio::time::timeout(Duration::from_secs(3), &mut reader).await.unwrap_or_default();
+    let abort = reader.abort_handle();
+    let (o, e) = match tokio::time::timeout(Duration::from_secs(3), reader).await {
+        Ok(Ok(r)) => r,
+        _ => {
+            abort.abort();
+            Default::default()
+        }
+    };
     let mut output = String::from_utf8_lossy(&o).into_owned();
     let err = String::from_utf8_lossy(&e);
     if !err.trim().is_empty() {
@@ -143,6 +149,41 @@ pub async fn exec(
         output.push_str(&err);
     }
     Ok(ExecOutput { output, code: status.and_then(|s| s.code()), timed_out, cancelled, elapsed: started.elapsed() })
+}
+
+/// 单路输出最多保留的字节数；超出部分继续读走丢弃，保证子进程不会因管道写满阻塞。
+const MAX_CAPTURE: usize = 4 * 1024 * 1024;
+
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut r: R, cap: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match r.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let room = cap.saturating_sub(out.len());
+                out.extend_from_slice(&buf[..n.min(room)]);
+            }
+        }
+    }
+    out
+}
+
+/// 未解除时在析构中发出进程组终止（不等待结果）。
+struct GroupGuard(Option<u32>);
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        let Some(pid) = self.0 else { return };
+        // 用 tokio 的 Command：丢弃的子进程由 tokio 回收，不留僵尸；不在运行时内则无法回收，跳过
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        #[cfg(unix)]
+        let _ = Command::new("kill").arg("-KILL").arg("--").arg(format!("-{pid}")).spawn();
+        #[cfg(not(unix))]
+        let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &pid.to_string()]).spawn();
+    }
 }
 
 #[cfg(unix)]

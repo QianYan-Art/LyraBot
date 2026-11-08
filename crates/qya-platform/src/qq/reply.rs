@@ -43,7 +43,10 @@ impl ReplyState {
     /// 收到主动消息许可类事件（带 event_id，可在窗口内引用回复）。
     pub fn on_event(&mut self, event_id: &str, now_ms: i64, allowed: bool) {
         self.proactive_allowed = allowed;
-        if allowed && !event_id.is_empty() {
+        if !allowed {
+            // 拒收或删除好友后，旧的事件锚点也不再可用
+            self.event = None;
+        } else if !event_id.is_empty() {
             self.event = Some(Anchor { id: event_id.to_owned(), at_ms: now_ms, used: 0 });
         }
     }
@@ -100,7 +103,6 @@ mod tests {
         s.on_event("e1", 0, true);
         assert_eq!(s.route(1, true), Route::Event { event_id: "e1".into(), seq: 1 });
         s.on_event("", 2, false);
-        s.event = None;
         assert_eq!(s.route(3, true), Route::Defer, "拒收主动消息后不再主动发");
     }
 }

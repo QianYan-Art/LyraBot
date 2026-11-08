@@ -159,7 +159,10 @@ impl Douyin {
             }
             *b = Some(Binding { job_id: job_id.to_owned(), requested_at: now, expires_at: now + VERIFY_TTL, requesting: true, sms_ready: false, processing: false });
         }
+        // 请求期间外层可能被取消（future 被丢弃），守卫保证 requesting 状态不会永久残留
+        let mut guard = RequestingGuard { binding: &self.binding, job_id, armed: true };
         let res = self.client.content(json!({"action": "verification_request_sms", "job_id": job_id})).await;
+        guard.armed = false;
         let mut b = self.binding.lock().expect("binding 锁中毒");
         match res {
             Ok(v) if v["state"] == "ready" && v.pointer("/job/job_id").and_then(Value::as_str) == Some(job_id) => {
@@ -171,7 +174,9 @@ impl Douyin {
             }
             Ok(v) => {
                 *b = None;
-                Ok(v)
+                let state = v["state"].as_str().unwrap_or("unknown");
+                let msg = v["message"].as_str().unwrap_or_default();
+                Err(format!("发码未就绪（状态 {state}）：{msg}；未自动重试，请先查询原任务。"))
             }
             Err(e) => {
                 *b = None;
@@ -283,6 +288,26 @@ impl Douyin {
             _ => format!("〔抖音发布：计划 {token} 当前状态 {state}（任务 {job}）。平台说明：{msg}。不要自动重试，需要时让创作专员按恢复指引处理。〕"),
         };
         Outcome { user_notice: None, persona_note: Some(note) }
+    }
+}
+
+/// `request_sms` 的取消守卫：未解除就被丢弃时清掉仍处于 requesting 的同一任务绑定。
+struct RequestingGuard<'a> {
+    binding: &'a std::sync::Mutex<Option<Binding>>,
+    job_id: &'a str,
+    armed: bool,
+}
+
+impl Drop for RequestingGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut b) = self.binding.lock()
+            && b.as_ref().is_some_and(|p| p.requesting && p.job_id == self.job_id)
+        {
+            *b = None;
+        }
     }
 }
 

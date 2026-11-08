@@ -48,6 +48,9 @@ struct State {
     seen: VecDeque<String>,
 }
 
+/// 延迟投递队列上限。
+const MAX_DEFERRED: usize = 50;
+
 pub struct QqPlatform {
     api: Arc<Api>,
     store: Store,
@@ -79,6 +82,16 @@ impl QqPlatform {
         self.state.lock().expect("qq 状态锁中毒")
     }
 
+    /// 加入延迟队列；超过上限时丢弃最旧的一条，避免长期无窗口时无界增长。
+    fn defer(&self, out: Outbound) {
+        let mut st = self.st();
+        st.deferred.push(out);
+        if st.deferred.len() > MAX_DEFERRED {
+            st.deferred.remove(0);
+            tracing::warn!("延迟队列已满，丢弃最旧的一条");
+        }
+    }
+
     fn openid(&self) -> &str {
         &self.api.cfg().allowed_users[0]
     }
@@ -93,11 +106,19 @@ impl QqPlatform {
             SendErrorKind::Forbidden => GwError::Fatal(e.message),
             _ => GwError::Retry(e.message),
         })?;
-        let (ws, _) = tokio_tungstenite::connect_async(url.as_str()).await.map_err(|e| GwError::Retry(format!("连接网关失败：{e}")))?;
+        let (ws, _) = tokio::time::timeout(Duration::from_secs(20), tokio_tungstenite::connect_async(url.as_str()))
+            .await
+            .map_err(|_| GwError::Retry("连接网关超时".into()))?
+            .map_err(|e| GwError::Retry(format!("连接网关失败：{e}")))?;
         let (mut tx, mut rx) = ws.split();
         let mut heartbeat: Option<tokio::time::Interval> = None;
+        // 已发出但未收到 ACK（op 11）的心跳数；连续两次未确认视为连接假死
+        let mut unacked = 0u32;
+        let hello_deadline = tokio::time::sleep(Duration::from_secs(30));
+        tokio::pin!(hello_deadline);
         tracing::info!("QQ 网关已连接");
         loop {
+            let waiting_hello = heartbeat.is_none();
             let tick = async {
                 match heartbeat.as_mut() {
                     Some(i) => {
@@ -107,7 +128,14 @@ impl QqPlatform {
                 }
             };
             tokio::select! {
+                _ = &mut hello_deadline, if waiting_hello => {
+                    return Err(GwError::Retry("连接后 30 秒未收到 Hello".into()));
+                }
                 _ = tick => {
+                    if unacked >= 2 {
+                        return Err(GwError::Retry("心跳连续未确认，连接可能已失效".into()));
+                    }
+                    unacked += 1;
                     let seq = self.session.lock().await.seq;
                     tx.send(Message::text(json!({"op": 1, "d": seq}).to_string())).await.map_err(|e| GwError::Retry(format!("发送心跳失败：{e}")))?;
                 }
@@ -120,6 +148,9 @@ impl QqPlatform {
                     match msg {
                         Message::Text(t) => {
                             let Ok(p) = serde_json::from_str::<Value>(&t) else { continue };
+                            if p["op"].as_u64() == Some(11) {
+                                unacked = 0;
+                            }
                             if let Some(reply) = self.handle_payload(&p, inbox, &mut heartbeat).await? {
                                 tx.send(Message::text(reply.to_string())).await.map_err(|e| GwError::Retry(format!("发送失败：{e}")))?;
                             }
@@ -252,7 +283,12 @@ impl QqPlatform {
             let text = deferred.iter().map(|o| o.text.trim()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
             let media = deferred.into_iter().flat_map(|o| o.media).collect();
             tracing::info!("补发此前延迟的 QQ 消息");
-            let _ = self.send(Outbound { text, media, reply_to: None }).await;
+            let out = Outbound { text, media, reply_to: None };
+            if let Err(e) = self.send(out.clone()).await {
+                // 文字没发出去：放回延迟队列最前，下次阿颜说话时再补
+                tracing::warn!(error = %e.message, "补发失败，保留到下次");
+                self.st().deferred.insert(0, out);
+            }
         }
     }
 
@@ -268,7 +304,7 @@ impl QqPlatform {
             Route::Proactive => self.api.send_c2c(&openid, body, None).await,
             Route::Defer => {
                 tracing::info!("没有可用的 QQ 回复通道（被动窗口已过且主动额度用尽），延迟到阿颜下次说话");
-                self.st().deferred.push(fallback.clone());
+                self.defer(fallback.clone());
                 return Ok(false);
             }
         };
@@ -281,7 +317,7 @@ impl QqPlatform {
             }
             Err(e) if route == Route::Proactive && e.kind == SendErrorKind::Forbidden => {
                 tracing::warn!(error = %e.message, "主动消息被拒绝，延迟投递");
-                self.st().deferred.push(fallback.clone());
+                self.defer(fallback.clone());
                 Ok(false)
             }
             Err(e) => Err(e),

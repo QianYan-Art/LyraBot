@@ -402,6 +402,11 @@ impl Supervisor {
         }
     }
 
+    /// 排队或运行中的执行者会话。
+    pub fn active_ids(&self) -> Vec<SessionId> {
+        self.workers().iter().filter(|(_, h)| h.st().status.is_active()).map(|(id, _)| *id).collect()
+    }
+
     pub fn running(&self) -> usize {
         self.workers().values().filter(|h| h.st().status.is_active()).count()
     }
