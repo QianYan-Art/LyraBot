@@ -17,6 +17,7 @@ use qya_orchestra::{AgentCtlTool, ContextMode, DelegateRequest, DelegateTool, No
 use qya_tools::{Memory, MemoryTarget};
 use qya_platform::{Inbound, Outbound, Platform};
 use qya_store::{NewSession, SessionKind, SessionRow, Store};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -87,6 +88,44 @@ pub struct Runtime {
     started: Instant,
 }
 
+/// 一条待交给唐语歌的后台汇报。
+#[derive(Debug, Clone, PartialEq)]
+struct Relay {
+    /// 信箱信件 id；0 表示落库失败、无需确认
+    id: i64,
+    msg: Message,
+    notify: Notify,
+}
+
+impl State {
+    /// 有需要开一轮的内容：阿颜的消息，或需要立即转述的后台汇报。
+    fn has_work(&self) -> bool {
+        !self.pending.is_empty() || self.mail.iter().any(|r| r.notify == Notify::Relay)
+    }
+}
+
+/// 一轮结束时处理带上的汇报：输入已落库则全部确认；否则放回队首，
+/// `quiet` 时（出错或 /stop）改为静默，等阿颜下次说话再带上，避免对同一错误反复重试。
+fn settle(inflight: Vec<Relay>, saved: bool, quiet: bool, queue: &mut Vec<Relay>) -> Vec<i64> {
+    if saved {
+        return inflight.into_iter().map(|r| r.id).filter(|&id| id != 0).collect();
+    }
+    let back = inflight.into_iter().map(|r| if quiet { Relay { notify: Notify::Silent, ..r } } else { r });
+    let rest = std::mem::take(queue);
+    queue.extend(back);
+    queue.extend(rest);
+    Vec::new()
+}
+
+/// 被打断的一轮：未得到回应的输入、内核队列里没来得及注入的消息、期间新到的消息，按到达顺序排回缓冲。
+/// `skip` 为输入开头那几条后台汇报的条数（它们经 [`settle`] 放回汇报队列，这里去掉以免重复）。
+fn requeue(mut unconsumed: Vec<Message>, skip: usize, mut leftover: Vec<Message>, mut pending: Vec<Message>) -> Vec<Message> {
+    unconsumed.drain(..skip.min(unconsumed.len()));
+    unconsumed.append(&mut leftover);
+    unconsumed.append(&mut pending);
+    unconsumed
+}
+
 #[derive(Default)]
 struct State {
     session: SessionId,
@@ -102,6 +141,12 @@ struct State {
     last_activity: Option<Instant>,
     /// 后台结果附带的媒体，随下一轮唐语歌的回复一起发出
     relay_media: Vec<PathBuf>,
+    /// 当前这一轮正在发送的后台媒体（发完前不被媒体清理删除）
+    media_inflight: Vec<PathBuf>,
+    /// 等待交给唐语歌的后台汇报（信箱中尚未确认）；只在一轮开始时整体取用，不走插话通道
+    mail: Vec<Relay>,
+    /// 当前这一轮带上的汇报；该轮输入落库后确认，否则放回 `mail`
+    inflight: Vec<Relay>,
     /// /stop 发出后为真：被取消那一轮未处理的输入直接丢弃，而不是重新排队
     discard_unconsumed: bool,
     last_usage: Usage,
@@ -151,6 +196,23 @@ impl Runtime {
             _ => rt.new_persona_session().await?,
         };
         rt.state().session = session;
+        // 在平台接入、定时任务启动之前：把上次被中断的任务转成汇报，并装载所有未确认的汇报
+        let recovered = rt.sup.recover().await.map_err(anyhow::Error::msg).context("恢复被中断的后台任务")?;
+        let mail = rt.store.pending_mail().await?;
+        {
+            let mut st = rt.state();
+            for m in &mail {
+                match WorkerReport::from_mail(m) {
+                    Some(r) => {
+                        Self::queue_report(&mut st, r);
+                    }
+                    None => tracing::warn!(mail = m.id, "无法解析的后台汇报，已跳过"),
+                }
+            }
+        }
+        if recovered > 0 || !mail.is_empty() {
+            tracing::info!(recovered, pending = mail.len(), "已装载未确认的后台汇报");
+        }
         Ok(rt)
     }
 
@@ -304,23 +366,35 @@ impl Runtime {
         }
     }
 
-    /// 消费后台结果：转为〔后台结果〕消息交给唐语歌，按 notify 决定立即转述还是等阿颜下次说话。
+    /// 消费后台结果：转为〔后台结果〕排队交给唐语歌，按 notify 决定立即开一轮转述还是等阿颜下次说话。
     fn spawn_report_consumer(self: Arc<Self>) {
         let Some(mut rx) = self.reports.lock().expect("reports 锁中毒").take() else { return };
+        // 启动时装载的汇报若需要立即转述，先开一轮
+        if self.state().has_work() {
+            self.clone().arm_timer();
+        }
         tokio::spawn(async move {
             while let Some(r) = rx.recv().await {
-                let msg = Message::user(relay_text(&r));
-                let mut st = self.state();
-                st.relay_media.extend(r.media.iter().cloned());
-                match r.notify {
-                    Notify::Silent => st.pending.push(msg),
-                    Notify::Relay => {
-                        drop(st);
-                        self.clone().on_chat(msg, false);
-                    }
+                let start = {
+                    let mut st = self.state();
+                    let relay = r.notify == Notify::Relay;
+                    Self::queue_report(&mut st, r) && relay && matches!(st.phase, Phase::Idle | Phase::Debouncing)
+                };
+                if start {
+                    self.clone().arm_timer();
                 }
             }
         });
+    }
+
+    /// 汇报入队（按信件 id 去重），返回是否新加入。
+    fn queue_report(st: &mut State, r: WorkerReport) -> bool {
+        if r.mail != 0 && st.mail.iter().chain(&st.inflight).any(|m| m.id == r.mail) {
+            return false;
+        }
+        st.relay_media.extend(r.media.iter().cloned());
+        st.mail.push(Relay { id: r.mail, msg: Message::user(relay_text(&r)), notify: r.notify });
+        true
     }
 
     /// 每周自动清理一次历史会话（上次时间记在 kv，进程重启不影响周期）。
@@ -417,12 +491,34 @@ impl Runtime {
             loop {
                 tick.tick().await;
                 let dir = self.cfg.get().tools.media_dir.clone();
-                let removed = tokio::task::spawn_blocking(move || gc_dir(&dir, Duration::from_secs(24 * 3600))).await.unwrap_or(0);
+                let keep = match self.referenced_media().await {
+                    Ok(k) => k,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "读取待投递媒体失败，本次跳过清理");
+                        continue;
+                    }
+                };
+                let removed = tokio::task::spawn_blocking(move || gc_dir(&dir, Duration::from_secs(24 * 3600), &keep)).await.unwrap_or(0);
                 if removed > 0 {
                     tracing::info!(removed, "已清理过期媒体文件");
                 }
             }
         });
+    }
+
+    /// 未确认的汇报、发件箱与待随回复发出的媒体文件（清理时保留）。
+    async fn referenced_media(&self) -> Result<HashSet<PathBuf>> {
+        let mut keep: HashSet<PathBuf> = {
+            let st = self.state();
+            st.relay_media.iter().chain(&st.media_inflight).cloned().collect()
+        };
+        for m in self.store.pending_mail().await? {
+            keep.extend(m.payload["media"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).map(PathBuf::from));
+        }
+        for q in self.store.outbox_list("qq").await? {
+            keep.extend(q.payload["media"].as_str().map(PathBuf::from));
+        }
+        Ok(keep)
     }
 
     /// 定时任务调度：每 30 秒检查一次到期任务。
@@ -524,14 +620,19 @@ impl Runtime {
             tokio::time::sleep(wait).await;
             let (inputs, media, cancel) = {
                 let mut st = self.state();
-                if st.timer_gen != gen_ || st.phase != Phase::Debouncing || st.pending.is_empty() {
+                if st.timer_gen != gen_ || st.phase != Phase::Debouncing || !st.has_work() {
                     return;
                 }
                 st.first_pending = None;
                 st.phase = Phase::Generating;
                 let c = CancellationToken::new();
                 st.running = Some(c.clone());
-                (std::mem::take(&mut st.pending), std::mem::take(&mut st.relay_media), c)
+                st.inflight = std::mem::take(&mut st.mail);
+                let mut inputs: Vec<Message> = st.inflight.iter().map(|r| r.msg.clone()).collect();
+                inputs.append(&mut st.pending);
+                let media = std::mem::take(&mut st.relay_media);
+                st.media_inflight = media.clone();
+                (inputs, media, c)
             };
             // 单独的任务里跑：即使本轮 panic，也能回到 finish_turn 复位状态，而不是永远卡在“回复中”
             let me = self.clone();
@@ -545,7 +646,7 @@ impl Runtime {
 
     /// 一轮结束：投递结果，然后回到空闲；期间积累的消息开始新一轮去抖。
     async fn finish_turn(self: Arc<Self>, mut result: Result<TurnOutcome>, relay_media: Vec<PathBuf>) {
-        {
+        let acked = {
             let mut st = self.state();
             st.phase = Phase::Delivering;
             st.running = None;
@@ -556,13 +657,15 @@ impl Runtime {
                 // 被打断的一轮不投递：未得到回应的输入排回缓冲最前面，后台媒体留给下一轮
                 Ok(o) if o.reason == StopReason::Cancelled => {
                     if !discard {
-                        let mut merged = std::mem::take(&mut o.unconsumed);
-                        merged.append(&mut leftover);
-                        merged.append(&mut st.pending);
-                        st.pending = merged;
+                        let unconsumed = std::mem::take(&mut o.unconsumed);
+                        let skip = if o.inputs_saved { 0 } else { st.inflight.len() };
+                        let pending = std::mem::take(&mut st.pending);
+                        st.pending = requeue(unconsumed, skip, std::mem::take(&mut leftover), pending);
                     }
                     st.relay_media.extend(relay_media);
                 }
+                // 出错的一轮不投递回复，后台媒体留给下一轮
+                Ok(o) if o.reason == StopReason::Error => st.relay_media.extend(relay_media),
                 Ok(o) => o.media.extend(relay_media),
                 Err(_) => st.relay_media.extend(relay_media),
             }
@@ -575,12 +678,20 @@ impl Runtime {
                 st.last_usage = o.usage;
                 st.total_usage.add(&o.usage);
             }
+            let saved = matches!(&result, Ok(o) if o.inputs_saved);
+            let failed = !matches!(&result, Ok(o) if o.reason != StopReason::Error);
+            let inflight = std::mem::take(&mut st.inflight);
+            settle(inflight, saved, discard || failed, &mut st.mail)
+        };
+        if let Err(e) = self.store.ack_mail(acked).await {
+            tracing::warn!(error = %e, "确认后台汇报失败，重启后可能重复转述");
         }
         self.deliver(result).await;
         let has_pending = {
             let mut st = self.state();
             st.phase = Phase::Idle;
-            !st.pending.is_empty()
+            st.media_inflight.clear();
+            st.has_work()
         };
         if has_pending {
             self.arm_timer();
@@ -609,7 +720,12 @@ impl Runtime {
             StopReason::LoopGuard => {
                 let _ = platform.send(Outbound::text("（工具调用陷入重复，已停下）")).await;
             }
-            StopReason::Done | StopReason::Error => {}
+            StopReason::Error => {
+                tracing::error!(error = ?o.error, "唐语歌本轮模型请求失败");
+                let _ = platform.send(Outbound::text(friendly(o.error.as_ref().map(|e| e.kind)))).await;
+                return;
+            }
+            StopReason::Done => {}
         }
         if !streaming {
             let segs = pacer::segments(&o.text, self.pacer_cfg().max_segments);
@@ -739,7 +855,7 @@ impl Runtime {
             Command::Agent { id, action } => match action {
                 AgentAction::Show => self.agent_detail(id).await?,
                 AgentAction::Stop => self.sup.stop(id).unwrap_or_else(|e| e),
-                AgentAction::Say(t) => self.sup.continue_worker(id, &t).await.unwrap_or_else(|e| e),
+                AgentAction::Say(t) => self.sup.continue_worker(id, &t, self.session()).await.unwrap_or_else(|e| e),
             },
             Command::Reload => {
                 let c = self.cfg.reload()?;
@@ -967,9 +1083,10 @@ impl Runtime {
         Ok(())
     }
 
+    /// 退出前停下唐语歌当前一轮。后台任务不主动取消：保留运行标记，重启后作为“被中断”汇报交回，
+    /// 而不是误报成“被要求停止”；其子进程随服务的 cgroup 一起结束。
     pub async fn shutdown(&self) {
         self.stop_current();
-        self.sup.stop_all();
     }
 
     /// /agent <id>：基本信息 + 该执行者最近一条回复。
@@ -1010,12 +1127,16 @@ fn relay_text(r: &WorkerReport) -> String {
         WorkerKind::Worker => format!("后台 #{}「{}」", r.id, r.title),
         WorkerKind::Specialist(n) => format!("专员 {n}（#{}）", r.id),
     };
-    format!(
-        "〔后台结果：{who}{}，用时 {} 秒〕\n{}\n〔这是后台交回的结果，不是阿颜的新消息。用你自己的话把要点告诉阿颜；没做成就如实说。〕",
-        r.status.label(),
-        r.elapsed.as_secs(),
-        r.summary
-    )
+    let mut s = format!("〔后台结果：{who}{}，用时 {} 秒〕\n{}", r.status.label(), r.elapsed_s, r.summary);
+    if let Some(q) = &r.question {
+        s.push_str(&format!("\n〔需要阿颜决定〕{q}"));
+    }
+    s.push_str("\n〔这是后台交回的结果，不是阿颜的新消息。用你自己的话把要点告诉阿颜；没做成就如实说。");
+    if r.question.is_some() {
+        s.push_str("需要阿颜决定的问题要单独、简短地问出来，等阿颜回答后再用 agent_ctl continue 交给它。");
+    }
+    s.push('〕');
+    s
 }
 
 /// 专员只能编辑自己的记忆文件。
@@ -1030,15 +1151,15 @@ fn specialist_memory(c: &Config, kind: &WorkerKind) -> Vec<Arc<dyn Tool>> {
     vec![Arc::new(Memory::new(vec![target], "确认是以后还会用到的流程或事实再写。"))]
 }
 
-/// 递归删除目录下修改时间早于 `max_age` 的普通文件（不跟随符号链接），返回删除数量。
-fn gc_dir(dir: &std::path::Path, max_age: Duration) -> usize {
+/// 递归删除目录下修改时间早于 `max_age` 的普通文件（不跟随符号链接、跳过 `keep` 中的文件），返回删除数量。
+fn gc_dir(dir: &std::path::Path, max_age: Duration, keep: &HashSet<PathBuf>) -> usize {
     let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
     let mut n = 0;
     for e in rd.flatten() {
         let Ok(meta) = std::fs::symlink_metadata(e.path()) else { continue };
         if meta.is_dir() {
-            n += gc_dir(&e.path(), max_age);
-        } else if meta.is_file() && meta.modified().ok().and_then(|m| m.elapsed().ok()).is_some_and(|age| age > max_age) && std::fs::remove_file(e.path()).is_ok() {
+            n += gc_dir(&e.path(), max_age, keep);
+        } else if meta.is_file() && !keep.contains(&e.path()) && meta.modified().ok().and_then(|m| m.elapsed().ok()).is_some_and(|age| age > max_age) && std::fs::remove_file(e.path()).is_ok() {
             n += 1;
         }
     }
@@ -1047,11 +1168,14 @@ fn gc_dir(dir: &std::path::Path, max_age: Duration) -> usize {
 
 /// 给阿颜看的错误说明：只说原因类别，原始响应只写日志。
 fn friendly_error(e: &anyhow::Error) -> String {
-    use qya_llm::ErrorKind as K;
-    let kind = e.chain().find_map(|c| match c.downcast_ref::<qya_agent::AgentError>() {
+    friendly(e.chain().find_map(|c| match c.downcast_ref::<qya_agent::AgentError>() {
         Some(qya_agent::AgentError::Llm(l)) => Some(l.kind),
         _ => c.downcast_ref::<qya_llm::LlmError>().map(|l| l.kind),
-    });
+    }))
+}
+
+fn friendly(kind: Option<qya_llm::ErrorKind>) -> String {
+    use qya_llm::ErrorKind as K;
     match kind {
         Some(K::QuotaExhausted) => "（我这边的模型额度用完了，要等额度重置后才能好好回你。）".into(),
         Some(K::RateLimited) => "（模型那边有点忙，过一会儿再找我好吗。）".into(),
@@ -1064,13 +1188,51 @@ fn friendly_error(e: &anyhow::Error) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{Notify, Relay, State, requeue, settle};
+    use qya_core::Message;
+
+    fn relay(id: i64, notify: Notify) -> Relay {
+        Relay { id, msg: Message::user(format!("〔后台结果 {id}〕")), notify }
+    }
+
+    #[test]
+    fn requeue_drops_relay_copies_and_keeps_order() {
+        let m = |t: &str| Message::user(t);
+        // 本轮输入 = [汇报, 阿颜1]，未落库被打断；插话与新消息依次排在后面
+        let out = requeue(vec![m("〔汇报〕"), m("阿颜1")], 1, vec![m("插话")], vec![m("阿颜2")]);
+        assert_eq!(out.iter().map(Message::text).collect::<Vec<_>>(), vec!["阿颜1", "插话", "阿颜2"]);
+        // 输入已落库时 unconsumed 只剩之后到的消息，不做截取
+        let out = requeue(vec![m("插话")], 0, vec![], vec![]);
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn settle_acks_only_saved_turns() {
+        let mut queue = vec![relay(3, Notify::Relay)];
+        // 输入已落库：确认（id 0 表示未落库的汇报，不需要确认）
+        assert_eq!(settle(vec![relay(1, Notify::Relay), relay(0, Notify::Relay)], true, false, &mut queue), vec![1]);
+        assert_eq!(queue.len(), 1);
+        // 被新消息打断、尚未落库：原样放回队首
+        assert!(settle(vec![relay(2, Notify::Relay)], false, false, &mut queue).is_empty());
+        assert_eq!(queue.iter().map(|r| (r.id, r.notify)).collect::<Vec<_>>(), vec![(2, Notify::Relay), (3, Notify::Relay)]);
+        // 出错或 /stop：放回并改为静默，不反复重试
+        let mut queue = Vec::new();
+        settle(vec![relay(4, Notify::Relay)], false, true, &mut queue);
+        assert_eq!(queue, vec![relay(4, Notify::Silent)]);
+        let st = State { mail: queue, ..Default::default() };
+        assert!(!st.has_work(), "静默汇报等阿颜下次说话");
+    }
+
     #[test]
     fn gc_removes_only_old_files() {
         let d = std::env::temp_dir().join(format!("qya-gc-{}", std::process::id()));
         std::fs::create_dir_all(d.join("inbox")).unwrap();
         std::fs::write(d.join("inbox/new.jpg"), b"x").unwrap();
-        assert_eq!(super::gc_dir(&d, std::time::Duration::from_secs(3600)), 0);
-        assert_eq!(super::gc_dir(&d, std::time::Duration::ZERO), 1);
+        let none = std::collections::HashSet::new();
+        assert_eq!(super::gc_dir(&d, std::time::Duration::from_secs(3600), &none), 0);
+        let keep = std::collections::HashSet::from([d.join("inbox/new.jpg")]);
+        assert_eq!(super::gc_dir(&d, std::time::Duration::ZERO, &keep), 0, "仍被引用的文件保留");
+        assert_eq!(super::gc_dir(&d, std::time::Duration::ZERO, &none), 1);
         assert!(!d.join("inbox/new.jpg").exists());
     }
 }

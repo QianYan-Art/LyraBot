@@ -1,7 +1,8 @@
 use qya_agent::{Kernel, Queues, Tool, ToolRegistry, TurnSpec};
 use qya_config::{Config, ConfigHandle};
 use qya_core::{Effort, Message, SessionId, StopReason};
-use qya_store::{NewSession, SessionKind, SessionStatus};
+use qya_store::{Mail, NewSession, SessionKind, SessionStatus};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -25,6 +26,9 @@ use tokio_util::sync::CancellationToken;
 
 /// worker 汇报摘要的上限（字）；完整过程留在 worker 会话里。
 const SUMMARY_LIMIT: usize = 1200;
+/// 需要阿颜决定的问题上限（字）。
+const QUESTION_LIMIT: usize = 300;
+const INTERRUPTED_SUMMARY: &str = "服务重启时这个任务还没做完，已有进展保存在它的会话里。需要的话用 agent_ctl continue 续接；续接时它会先核对已经做过的部分，不重复外部操作。";
 /// fork 模式下为唐语歌那次 delegate 调用补的工具结果。
 const FORK_PLACEHOLDER: &str = "（这件事已交给后台执行者处理）";
 const FORK_INSTRUCTION: &str = "〔以上是唐语歌和阿颜的对话，供你了解来龙去脉。从现在起你是后台执行者，不扮演唐语歌，不对阿颜说话，只完成下面的任务并按系统提示写汇报。〕";
@@ -53,7 +57,7 @@ pub enum Target {
     Specialist(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Notify {
     /// 完成后立即交给唐语歌转述
     Relay,
@@ -76,19 +80,23 @@ pub struct DelegateRequest {
     pub notify: Notify,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkerKind {
     Worker,
     Specialist(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkerStatus {
     Queued,
     Running,
     Done,
+    /// 本轮结束，等阿颜对汇报里的问题拍板
+    Waiting,
     Failed,
     Cancelled,
+    /// 服务重启时仍在排队或运行
+    Interrupted,
 }
 
 impl WorkerStatus {
@@ -97,8 +105,10 @@ impl WorkerStatus {
             Self::Queued => "排队中",
             Self::Running => "进行中",
             Self::Done => "已完成",
+            Self::Waiting => "等阿颜决定",
             Self::Failed => "失败",
             Self::Cancelled => "已停止",
+            Self::Interrupted => "被中断",
         }
     }
     fn is_active(self) -> bool {
@@ -106,17 +116,31 @@ impl WorkerStatus {
     }
 }
 
-/// 交回唐语歌的结果。
-#[derive(Debug, Clone)]
+/// 交回唐语歌的结果。先写入信箱（`mail` 为信件 id）再投递，确认送达前进程重启也不会丢。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerReport {
+    #[serde(skip)]
+    pub mail: i64,
     pub id: SessionId,
     pub title: String,
     pub kind: WorkerKind,
     pub status: WorkerStatus,
     pub summary: String,
+    /// 需要阿颜拍板的问题（执行者经 need_decision 提出）
+    #[serde(default)]
+    pub question: Option<String>,
     pub media: Vec<PathBuf>,
     pub notify: Notify,
-    pub elapsed: Duration,
+    pub elapsed_s: u64,
+}
+
+impl WorkerReport {
+    /// 从信箱记录还原（启动时补投未确认的汇报）。
+    pub fn from_mail(m: &Mail) -> Option<Self> {
+        let mut r: Self = serde_json::from_value(m.payload.clone()).ok()?;
+        r.mail = m.id;
+        Some(r)
+    }
 }
 
 /// /agents 与 agent_ctl 展示用的快照。
@@ -135,6 +159,7 @@ pub struct WorkerInfo {
 struct HState {
     status: WorkerStatus,
     progress: Option<String>,
+    question: Option<String>,
     cancel: Option<CancellationToken>,
     started: Option<Instant>,
     finished: Option<Duration>,
@@ -156,7 +181,15 @@ impl Handle {
             kind,
             title,
             queues: Arc::new(Queues::default()),
-            state: Mutex::new(HState { status, progress: None, cancel: None, started: None, finished: None, notify: Notify::Relay }),
+            state: Mutex::new(HState {
+                status,
+                progress: None,
+                question: None,
+                cancel: None,
+                started: None,
+                finished: None,
+                notify: Notify::Relay,
+            }),
         })
     }
     fn st(&self) -> std::sync::MutexGuard<'_, HState> {
@@ -165,6 +198,9 @@ impl Handle {
     pub(crate) fn set_progress(&self, p: String) {
         self.st().progress = Some(p);
     }
+    pub(crate) fn set_question(&self, q: &str) {
+        self.st().question = Some(clip(q, QUESTION_LIMIT));
+    }
 }
 
 struct Inner {
@@ -172,6 +208,8 @@ struct Inner {
     kernel: Kernel,
     tools: ToolRegistry,
     sem: Arc<Semaphore>,
+    /// 给阿颜续接已有任务预留的额外名额：并发占满时，人的追问不必排在新任务后面
+    spare: Arc<Semaphore>,
     workers: Mutex<BTreeMap<SessionId, Arc<Handle>>>,
     reports: mpsc::UnboundedSender<WorkerReport>,
     providers: ProviderFn,
@@ -181,6 +219,10 @@ struct Inner {
 #[derive(Clone)]
 pub struct Supervisor {
     inner: Arc<Inner>,
+}
+
+fn tokens_of(m: &Message) -> i64 {
+    qya_agent::context::estimate_tokens(m.char_len()) as i64
 }
 
 fn kv_specialist(name: &str) -> String {
@@ -213,6 +255,7 @@ impl Supervisor {
                 kernel,
                 tools,
                 sem: Arc::new(Semaphore::new(n)),
+                spare: Arc::new(Semaphore::new(1)),
                 workers: Mutex::new(BTreeMap::new()),
                 reports,
                 providers,
@@ -263,7 +306,7 @@ impl Supervisor {
         let note = req.context_note.as_deref().map(str::trim).filter(|n| !n.is_empty());
         let mut downgraded = false;
 
-        let (handle, input) = match &req.target {
+        let (handle, input, cancel) = match &req.target {
             Target::Worker => {
                 let fork_entry = if req.context == ContextMode::Fork {
                     store.session(req.parent).await.map_err(err)?.leaf_id
@@ -292,9 +335,10 @@ impl Supervisor {
                     _ => format!("任务：{task}"),
                 };
                 input.push(Message::user(body));
-                let h = Handle::new(id, WorkerKind::Worker, clip(task, 30), WorkerStatus::Queued);
+                let h = Handle::new(id, WorkerKind::Worker, clip(task, 30), WorkerStatus::Done);
+                let cancel = Self::claim(&mut h.st(), req.notify);
                 self.workers().insert(id, h.clone());
-                (h, input)
+                (h, input, cancel)
             }
             Target::Specialist(name) => {
                 if req.context == ContextMode::Fork {
@@ -327,16 +371,15 @@ impl Supervisor {
                     .entry(id)
                     .or_insert_with(|| Handle::new(id, WorkerKind::Specialist(name.clone()), name.clone(), WorkerStatus::Done))
                     .clone();
-                if h.st().status.is_active() {
-                    h.queues.follow_up(Message::user(body));
+                let msg = Message::user(body);
+                let Some(cancel) = self.enqueue_or_claim(&h, &msg, false, req.notify, req.parent).await else {
                     return Ok(format!("专员 {name} 正在忙，任务已排在它手头的活之后（#{id}）"));
-                }
-                (h, vec![Message::user(body)])
+                };
+                (h, vec![msg], cancel)
             }
         };
-        handle.st().notify = req.notify;
         let id = handle.id;
-        self.spawn(handle, input);
+        self.launch(handle, input, req.parent, cancel, false).await?;
         let who = match &req.target {
             Target::Worker => format!("后台 #{id}"),
             Target::Specialist(n) => format!("专员 {n}（#{id}）"),
@@ -348,8 +391,9 @@ impl Supervisor {
         Ok(msg)
     }
 
-    /// 续接或插话：运行中则作为插话注入，已结束则在原会话上再跑一轮。
-    pub async fn continue_worker(&self, id: SessionId, text: &str) -> Result<String, String> {
+    /// 续接或插话：运行中则作为插话注入，已结束则在原会话上再跑一轮（可使用预留名额）。
+    /// `owner` 为这次续接的汇报收件会话。
+    pub async fn continue_worker(&self, id: SessionId, text: &str, owner: SessionId) -> Result<String, String> {
         let existing = self.workers().get(&id).cloned();
         let handle = match existing {
             Some(h) => h,
@@ -365,12 +409,10 @@ impl Supervisor {
             }
         };
         let msg = Message::user(text.trim().to_owned());
-        if handle.st().status.is_active() {
-            handle.queues.steer(msg);
+        let Some(cancel) = self.enqueue_or_claim(&handle, &msg, true, Notify::Relay, owner).await else {
             return Ok(format!("已把这句话插给 #{id}"));
-        }
-        handle.st().notify = Notify::Relay;
-        self.spawn(handle, vec![msg]);
+        };
+        self.launch(handle, vec![msg], owner, cancel, true).await?;
         Ok(format!("已续接 #{id}"))
     }
 
@@ -383,14 +425,6 @@ impl Supervisor {
                 Ok(format!("已让 #{id} 停下"))
             }
             _ => Err(format!("#{id} 当前没有在运行")),
-        }
-    }
-
-    pub fn stop_all(&self) {
-        for h in self.workers().values() {
-            if let Some(c) = h.st().cancel.take() {
-                c.cancel();
-            }
         }
     }
 
@@ -435,27 +469,186 @@ impl Supervisor {
         out
     }
 
-    fn spawn(&self, h: Arc<Handle>, input: Vec<Message>) {
-        let cancel = CancellationToken::new();
-        {
-            let mut st = h.st();
-            st.status = WorkerStatus::Queued;
-            st.cancel = Some(cancel.clone());
-            st.progress = None;
-            st.finished = None;
+    /// 启动时、任何任务派出之前调用一次：把上次退出时仍带运行标记的执行者转成“被中断”汇报写入信箱。
+    /// 逐项写入（写汇报的同一事务清标记），中途退出时剩下的标记保留到下次启动。
+    pub async fn recover(&self) -> Result<usize, String> {
+        let store = self.inner.kernel.store();
+        let lost = store.running_markers().await.map_err(|e| e.to_string())?;
+        for it in &lost {
+            let row = store.session(it.worker).await.map_err(|e| e.to_string())?;
+            let kind = match row.kind {
+                SessionKind::Specialist => WorkerKind::Specialist(row.name.clone().unwrap_or_default()),
+                _ => WorkerKind::Worker,
+            };
+            if kind == WorkerKind::Worker {
+                store.update_session(it.worker, None, None, Some(SessionStatus::Archived)).await.map_err(|e| e.to_string())?;
+            }
+            let restored = store.restore_queue(it.worker).await.map_err(|e| e.to_string())?;
+            if restored == 0 && !it.marked {
+                continue;
+            }
+            let mut summary = INTERRUPTED_SUMMARY.to_owned();
+            if restored > 0 {
+                summary.push_str(&format!("运行中收到的 {restored} 条补充已写进它的会话。"));
+            }
+            let report = WorkerReport {
+                mail: 0,
+                id: it.worker,
+                title: row.name.unwrap_or_default(),
+                kind,
+                status: WorkerStatus::Interrupted,
+                summary,
+                question: None,
+                media: Vec::new(),
+                notify: Notify::Relay,
+                elapsed_s: 0,
+            };
+            let payload = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+            store.post_report(it.worker, it.owner, payload).await.map_err(|e| e.to_string())?;
         }
-        let inner = self.inner.clone();
-        tokio::spawn(async move {
-            let report = Self::run(&inner, &h, input, cancel).await;
-            let _ = inner.reports.send(report);
-        });
+        if !lost.is_empty() {
+            tracing::warn!(count = lost.len(), "发现上次退出时被中断的后台任务");
+        }
+        Ok(lost.len())
     }
 
-    async fn run(inner: &Inner, h: &Arc<Handle>, input: Vec<Message>, cancel: CancellationToken) -> WorkerReport {
+    /// 运行中则把消息放进它的队列（插话或追问）并记入数据库，返回 `None`；否则占下这个执行者并返回取消令牌。
+    /// 检查与入队在同一把锁内，与收尾时的“检查剩余消息”互斥，不会漏消息。
+    async fn enqueue_or_claim(&self, h: &Handle, msg: &Message, steer: bool, notify: Notify, owner: SessionId) -> Option<CancellationToken> {
+        {
+            let mut st = h.st();
+            if !st.status.is_active() {
+                return Some(Self::claim(&mut st, notify));
+            }
+            if steer {
+                h.queues.steer(msg.clone());
+            } else {
+                h.queues.follow_up(msg.clone());
+            }
+        }
+        let saved = match serde_json::to_value(msg) {
+            Ok(v) => self.inner.kernel.store().queue_input(h.id, owner, v, tokens_of(msg)).await.map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(e) = saved {
+            tracing::warn!(id = h.id, error = %e, "插话落库失败，进程重启前退出会丢失这条");
+        }
+        None
+    }
+
+    fn claim(st: &mut HState, notify: Notify) -> CancellationToken {
+        let cancel = CancellationToken::new();
+        st.status = WorkerStatus::Queued;
+        st.cancel = Some(cancel.clone());
+        st.progress = None;
+        st.question = None;
+        st.finished = None;
+        st.notify = notify;
+        cancel
+    }
+
+    fn fail(h: &Handle) {
+        let mut st = h.st();
+        st.status = WorkerStatus::Failed;
+        st.cancel = None;
+    }
+
+    /// 先把任务正文与运行标记写入数据库（同一事务），成功后在同一个后台任务里开跑：
+    /// 返回 Ok 即保证进程随后退出也能在重启时发现并续接；调用方中途被取消也不会留下没人驱动的任务。
+    async fn launch(&self, h: Arc<Handle>, input: Vec<Message>, owner: SessionId, cancel: CancellationToken, priority: bool) -> Result<(), String> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            match Self::persist_input(&inner, h.id, owner, &input).await {
+                Ok(()) => {
+                    let _ = tx.send(Ok(()));
+                    Self::drive(inner, h, owner, cancel, priority).await;
+                }
+                Err(e) => {
+                    Self::fail(&h);
+                    let _ = tx.send(Err(format!("保存任务失败：{e}")));
+                }
+            }
+        });
+        rx.await.map_err(|_| "派出任务时内部错误".to_owned())?
+    }
+
+    async fn persist_input(inner: &Inner, id: SessionId, owner: SessionId, input: &[Message]) -> Result<(), String> {
+        let rows = input
+            .iter()
+            .map(|m| Ok((serde_json::to_value(m)?, tokens_of(m))))
+            .collect::<Result<Vec<_>, serde_json::Error>>()
+            .map_err(|e| e.to_string())?;
+        inner.kernel.store().begin_run(id, owner, rows).await.map_err(|e| e.to_string())
+    }
+
+    /// 后台驱动：执行 → 汇报写入信箱（同时清运行标记）→ 公开结束状态 → 交给运行时。
+    /// 公开结束状态前若队列里还有后到的插话或追问：被要求停止的只把它们写进会话；否则在同一会话上接着跑一轮。
+    async fn drive(inner: Arc<Inner>, h: Arc<Handle>, owner: SessionId, mut cancel: CancellationToken, mut priority: bool) {
+        loop {
+            let mut report = Self::run(&inner, &h, cancel, priority).await;
+            match serde_json::to_value(&report) {
+                Ok(payload) => report.mail = Self::post_with_retry(&inner, h.id, owner, payload).await,
+                Err(e) => tracing::error!(id = h.id, error = %e, "后台汇报序列化失败"),
+            }
+            let (leftover, next) = {
+                let mut st = h.st();
+                // stop 会取走取消令牌：汇报落库期间才到的 stop 同样不再续跑
+                let stopped = report.status == WorkerStatus::Cancelled || st.cancel.is_none();
+                let leftover = h.queues.take_all();
+                if leftover.is_empty() || stopped {
+                    st.status = report.status;
+                    st.cancel = None;
+                    st.finished = Some(Duration::from_secs(report.elapsed_s));
+                    (leftover, None)
+                } else {
+                    let next = Self::claim(&mut st, Notify::Relay);
+                    (leftover, Some(next))
+                }
+            };
+            let _ = inner.reports.send(report);
+            let Some(next) = next else {
+                // 被要求停止：后到的消息不再执行，但写进会话，续接时看得到
+                if !leftover.is_empty()
+                    && let Err(e) = inner.kernel.append_messages(h.id, &leftover).await
+                {
+                    tracing::error!(id = h.id, error = %e, "保存停止后到达的消息失败");
+                }
+                return;
+            };
+            if let Err(e) = Self::persist_input(&inner, h.id, owner, &leftover).await {
+                tracing::error!(id = h.id, error = %e, "保存后到的消息失败");
+                for m in leftover {
+                    h.queues.follow_up(m);
+                }
+                Self::fail(&h);
+                return;
+            }
+            (cancel, priority) = (next, true);
+        }
+    }
+
+    /// 写入信箱，失败时短暂重试；仍失败则返回 0（照常投递，运行标记保留，重启后会再报一次“被中断”）。
+    async fn post_with_retry(inner: &Inner, id: SessionId, owner: SessionId, payload: serde_json::Value) -> i64 {
+        let store = inner.kernel.store();
+        for attempt in 0..3u32 {
+            match store.post_report(id, owner, payload.clone()).await {
+                Ok(mail) => return mail,
+                Err(e) => {
+                    tracing::warn!(id, attempt, error = %e, "后台汇报落库失败");
+                    tokio::time::sleep(Duration::from_millis(500 << attempt)).await;
+                }
+            }
+        }
+        0
+    }
+
+    async fn run(inner: &Inner, h: &Arc<Handle>, cancel: CancellationToken, priority: bool) -> WorkerReport {
         let started = Instant::now();
         let outcome: Result<qya_agent::TurnOutcome, String> = async {
             let _permit = tokio::select! {
                 p = inner.sem.clone().acquire_owned() => p.map_err(|e| e.to_string())?,
+                p = inner.spare.clone().acquire_owned(), if priority => p.map_err(|e| e.to_string())?,
                 _ = cancel.cancelled() => return Err("排队时被停止".to_owned()),
             };
             {
@@ -466,8 +659,9 @@ impl Supervisor {
             let spec = Self::spec(inner, h).await?;
             let store = inner.kernel.store();
             let _ = store.update_session(h.id, None, None, Some(SessionStatus::Active)).await;
-            let out = inner.kernel.run_turn(&spec, h.id, input, &h.queues, cancel.clone()).await.map_err(|e| e.to_string())?;
-            // 执行者没有“合并重来”的需求：未得到回应的任务说明也要留在会话里，续接时才看得到
+            // 任务正文已在派出时写入会话，这里只驱动一轮
+            let out = inner.kernel.run_turn(&spec, h.id, Vec::new(), &h.queues, cancel.clone()).await.map_err(|e| e.to_string())?;
+            // 未得到回应的插话也要留在会话里，续接时才看得到
             if !out.unconsumed.is_empty() {
                 inner.kernel.append_messages(h.id, &out.unconsumed).await.map_err(|e| e.to_string())?;
             }
@@ -484,24 +678,36 @@ impl Supervisor {
                     format!("工具调用陷入重复被停下。最后的进展：{}", clip(&o.text, 300)),
                     o.media,
                 ),
-                StopReason::Error => (WorkerStatus::Failed, clip(&o.text, SUMMARY_LIMIT), o.media),
+                StopReason::Error => {
+                    let why = o.error.as_ref().map(ToString::to_string).unwrap_or_default();
+                    (WorkerStatus::Failed, format!("模型请求失败：{}", clip(&why, 300)), o.media)
+                }
             },
             Err(e) if cancel.is_cancelled() => (WorkerStatus::Cancelled, format!("已停止：{e}"), Vec::new()),
             Err(e) => (WorkerStatus::Failed, format!("执行出错：{}", clip(&e, 300)), Vec::new()),
         };
-        let elapsed = started.elapsed();
-        let notify = {
+        let (question, notify) = {
             let mut st = h.st();
-            st.status = status;
-            st.cancel = None;
-            st.finished = Some(elapsed);
-            st.notify
+            (st.question.take(), st.notify)
         };
+        let status = if status == WorkerStatus::Done && question.is_some() { WorkerStatus::Waiting } else { status };
         if h.kind == WorkerKind::Worker {
             let _ = inner.kernel.store().update_session(h.id, None, None, Some(SessionStatus::Archived)).await;
         }
+        let elapsed = started.elapsed();
         tracing::info!(id = h.id, status = status.label(), secs = elapsed.as_secs(), "后台任务结束");
-        WorkerReport { id: h.id, title: h.title.clone(), kind: h.kind.clone(), status, summary, media, notify, elapsed }
+        WorkerReport {
+            mail: 0,
+            id: h.id,
+            title: h.title.clone(),
+            kind: h.kind.clone(),
+            status,
+            summary,
+            question,
+            media,
+            notify,
+            elapsed_s: elapsed.as_secs(),
+        }
     }
 
     /// 执行者一轮的规格：执行者系统提示（+专员专长与记忆）、工具白名单。
@@ -542,7 +748,8 @@ impl Supervisor {
             .tools
             .select(&names)
             .map_err(|e| e.to_string())?
-            .with(Arc::new(crate::tools::ReportProgress::new(h.clone())) as Arc<dyn Tool>);
+            .with(Arc::new(crate::tools::ReportProgress::new(h.clone())) as Arc<dyn Tool>)
+            .with(Arc::new(crate::tools::NeedDecision::new(h.clone())) as Arc<dyn Tool>);
         if let Some(extras) = &inner.extras {
             for t in extras(&c, &h.kind) {
                 tools = tools.with(t);

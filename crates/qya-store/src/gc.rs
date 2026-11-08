@@ -55,7 +55,10 @@ impl Store {
                 let mut cand: HashSet<SessionId> = {
                     let mut st = tx.prepare(
                         "SELECT id FROM sessions WHERE updated_at < ?1 AND (
-                            (kind='persona' AND status='closed') OR (kind='worker' AND status='archived'))",
+                            (kind='persona' AND status='closed') OR (kind='worker' AND status='archived'))
+                         -- 还有未确认汇报的两端、运行中任务的收件会话都要保留
+                         AND id NOT IN (SELECT to_session FROM mailbox UNION SELECT from_session FROM mailbox
+                                        UNION SELECT run_owner FROM sessions WHERE run_owner IS NOT NULL)",
                     )?;
                     st.query_map([cutoff], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
                 };
@@ -91,6 +94,7 @@ impl Store {
                 if !ids.is_empty() {
                     let list = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
                     tx.execute(&format!("DELETE FROM mailbox WHERE to_session IN ({list}) OR from_session IN ({list})"), [])?;
+                    tx.execute(&format!("DELETE FROM run_queue WHERE worker IN ({list})"), [])?;
                     // 同一语句内删除整组条目；SQLite 在语句结束时检查外键
                     entries = tx.execute(&format!("DELETE FROM entries WHERE session_id IN ({list})"), [])?;
                     tx.execute(&format!("DELETE FROM sessions WHERE id IN ({list})"), [])?;
@@ -173,6 +177,36 @@ mod tests {
 
     fn sess(kind: SessionKind) -> NewSession {
         NewSession { kind: Some(kind), model: "m".into(), effort: "low".into(), ..Default::default() }
+    }
+
+    #[tokio::test]
+    async fn gc_keeps_pending_mail_and_run_owners() {
+        let s = Store::in_memory().unwrap();
+        let (old_persona, owner, w_mail, w_run) = (
+            s.create_session(sess(SessionKind::Persona)).await.unwrap(),
+            s.create_session(sess(SessionKind::Persona)).await.unwrap(),
+            s.create_session(sess(SessionKind::Worker)).await.unwrap(),
+            s.create_session(sess(SessionKind::Specialist)).await.unwrap(),
+        );
+        s.post_report(w_mail, old_persona, json!({"summary": "未确认"})).await.unwrap();
+        s.begin_run(w_run, owner, vec![]).await.unwrap();
+        for id in [old_persona, owner] {
+            s.update_session(id, None, None, Some(SessionStatus::Closed)).await.unwrap();
+        }
+        s.update_session(w_mail, None, None, Some(SessionStatus::Archived)).await.unwrap();
+        for id in [old_persona, owner, w_mail, w_run] {
+            age(&s, id, 40).await;
+        }
+        let r = s.gc_sessions(30, vec![]).await.unwrap();
+        assert!(r.deleted_ids.is_empty(), "{:?}", r.deleted_ids);
+        // 汇报确认后即可清理
+        let ids: Vec<i64> = s.pending_mail().await.unwrap().iter().map(|m| m.id).collect();
+        s.ack_mail(ids).await.unwrap();
+        s.post_report(w_run, owner, json!({})).await.unwrap();
+        let ids: Vec<i64> = s.pending_mail().await.unwrap().iter().map(|m| m.id).collect();
+        s.ack_mail(ids).await.unwrap();
+        let r = s.gc_sessions(30, vec![]).await.unwrap();
+        assert_eq!(r.deleted_ids, vec![old_persona, owner, w_mail]);
     }
 
     #[tokio::test]

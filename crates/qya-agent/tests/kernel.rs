@@ -191,6 +191,7 @@ async fn cancel_during_tool_keeps_structure_valid() {
     });
     let out = k.run_turn(&spec, sid, go(), &Queues::default(), cancel).await.unwrap();
     assert_eq!(out.reason, StopReason::Cancelled);
+    assert!(out.inputs_saved, "模型已回应（发起了工具调用），输入已落库");
     let msgs: Vec<Message> =
         k.store().branch(sid).await.unwrap().iter().map(|e| serde_json::from_value(e.payload.clone()).unwrap()).collect();
     assert_eq!(msgs.len(), 4, "每个工具调用都要有结果");
@@ -284,6 +285,7 @@ async fn cancel_before_reply_returns_unconsumed_inputs() {
     let out = k.run_turn(&spec, sid, vec![Message::user("一"), Message::user("二")], &Queues::default(), cancel).await.unwrap();
     assert_eq!(out.reason, StopReason::Cancelled);
     assert_eq!(out.unconsumed.iter().map(Message::text).collect::<Vec<_>>(), vec!["一", "二"]);
+    assert!(!out.inputs_saved);
     assert!(k.store().branch(sid).await.unwrap().is_empty(), "未得到回应的输入不落库");
 }
 
@@ -350,4 +352,30 @@ fn queues_take_all_drains_both() {
     q.follow_up(Message::user("追问"));
     assert_eq!(q.take_all().iter().map(Message::text).collect::<Vec<_>>(), vec!["插话", "追问"]);
     assert_eq!(q.pending(), 0);
+}
+
+/// 总是返回额度用尽的 Provider。
+struct Broken;
+#[async_trait]
+impl Provider for Broken {
+    fn id(&self) -> &str {
+        "broken"
+    }
+    async fn stream(&self, _req: ChatRequest, _c: CancellationToken) -> Result<EventRx, LlmError> {
+        Err(LlmError::new(qya_llm::ErrorKind::QuotaExhausted, "quota"))
+    }
+    async fn list_models(&self) -> Result<Vec<RemoteModel>, LlmError> {
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn model_error_is_reported_with_inputs_saved() {
+    let (k, mut spec, sid) = setup(Fake::new(vec![]), vec![], 100_000).await;
+    spec.provider = Arc::new(Broken);
+    let out = k.run_turn(&spec, sid, vec![Message::user("在吗")], &Queues::default(), CancellationToken::new()).await.unwrap();
+    assert_eq!(out.reason, StopReason::Error);
+    assert!(out.inputs_saved, "出错时输入已落库保留记录");
+    assert_eq!(out.error.map(|e| e.kind), Some(qya_llm::ErrorKind::QuotaExhausted));
+    assert_eq!(k.store().branch(sid).await.unwrap().len(), 1);
 }

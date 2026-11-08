@@ -61,15 +61,11 @@ worker_tools = ["shell", "fs_read", "fs_write", "fs_patch", "fs_search", "todo",
 
 [orchestra.specialists.ops]
 description = "运维：服务器、邮件、博客同步、流量日报"
-model = "k3-256k"
-effort = "high"
 memory = "ops.md"
 tools = ["shell", "fs_read", "fs_write", "fs_patch", "fs_search", "todo", "skill_view", "web_search", "grok_search", "grok_fetch", "komari_report", "blog_sync", "mail"]
 
 [orchestra.specialists.creator]
 description = "创作：抖音发布、封面与生图"
-model = "k3-256k"
-effort = "high"
 memory = "creator.md"
 tools = ["shell", "fs_read", "fs_write", "fs_patch", "fs_search", "todo", "skill_view", "web_search", "grok_search", "grok_fetch", "image_generate", "speak", "douyin_login", "douyin_content", "douyin_verification"]
 

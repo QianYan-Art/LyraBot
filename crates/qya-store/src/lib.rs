@@ -6,12 +6,16 @@
 mod cron;
 mod expressions;
 mod gc;
+mod mailbox;
 mod migrations;
+mod outbox;
 mod sessions;
 
 pub use cron::CronJob;
 pub use expressions::{Expression, LearnedExpression};
 pub use gc::{GcReport, SessionSummary, StoreStats};
+pub use mailbox::{Interrupted, Mail};
+pub use outbox::Queued;
 pub use sessions::{Entry, EntryKind, NewSession, SessionKind, SessionRow, SessionStatus};
 
 use rusqlite::Connection;

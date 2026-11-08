@@ -1,6 +1,6 @@
 //! QQ 适配器契约测试：本地 WebSocket 服务器模拟网关，wiremock 模拟开放平台 HTTP 接口。
 //! 覆盖：Identify 载荷、READY、心跳带 seq、入站过滤与转换、op7 后 Resume、被动回复 msg_id/msg_seq、
-//! 媒体上传后发送、致命关闭码停止重连。
+//! 媒体上传后发送、致命关闭码停止重连、延迟消息落库并在下次入站后补发。
 use futures_util::{SinkExt, StreamExt};
 use qya_config::QqConfig;
 use qya_core::Secret;
@@ -147,4 +147,80 @@ async fn proactive_quota_then_defer_until_next_inbound() {
         Ok(v)
     }).await.unwrap();
     assert_eq!(used, vec!["1".to_owned()], "主动消息计数持久化");
+    let queued = store.outbox_list("qq").await.unwrap();
+    assert_eq!(queued.len(), 1, "被延迟的消息落库");
+    assert_eq!(queued[0].payload["text"], "定时提醒");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_survives_restart_and_flushes_on_inbound() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_port = listener.local_addr().unwrap().port();
+    let http = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/token")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token": "T", "expires_in": 7200}))).mount(&http).await;
+    Mock::given(method("GET")).and(path("/gateway")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"url": format!("ws://127.0.0.1:{ws_port}")}))).mount(&http).await;
+    Mock::given(method("POST")).and(path("/v2/users/OPENID1/messages")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "x"}))).mount(&http).await;
+    Mock::given(method("POST")).and(path("/v2/users/OPENID1/files")).respond_with(ResponseTemplate::new(500)).mount(&http).await;
+    let cfg = QqConfig {
+        app_id: "APP".into(),
+        secret: Secret::new("S"),
+        allowed_users: vec!["OPENID1".into()],
+        api_base: http.uri(),
+        token_url: format!("{}/token", http.uri()),
+        reply_window_min: 60,
+        max_replies: 5,
+        proactive_monthly_quota: 0,
+        inbox_dir: std::env::temp_dir(),
+    };
+    let store = Store::in_memory().unwrap();
+    // 第一个进程：没有任何通道，两条消息都进发件箱
+    let before = QqPlatform::new(cfg.clone(), store.clone());
+    before.send(Outbound::text("后台结果一")).await.unwrap();
+    before.send(Outbound::text("后台结果二")).await.unwrap();
+    drop(before);
+    // 再排上：一个已被清理的文件、一个上传会失败的文件、一段文字
+    let img = std::env::temp_dir().join(format!("qya-outbox-{}.png", std::process::id()));
+    std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
+    store.outbox_push("qq", json!({"media": "/nonexistent/gone.png"}), 50).await.unwrap();
+    store.outbox_push("qq", json!({"media": img.display().to_string()}), 50).await.unwrap();
+    store.outbox_push("qq", json!({"text": "后台结果三"}), 50).await.unwrap();
+    assert_eq!(store.outbox_list("qq").await.unwrap().len(), 5);
+
+    // “重启”后的进程：阿颜说话打开被动窗口，后台按顺序合并补发
+    let qq = Arc::new(QqPlatform::new(cfg, store.clone()));
+    let (tx, mut inbox) = mpsc::channel(8);
+    let runner = {
+        let qq = qq.clone();
+        tokio::spawn(async move { qq.run(tx).await })
+    };
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+    send(&mut ws, json!({"op": 10, "d": {"heartbeat_interval": 30000}})).await;
+    assert_eq!(recv_json(&mut ws).await["op"], 2);
+    send(&mut ws, c2c(1, "MSG9", "OPENID1", "我回来了")).await;
+    tokio::time::timeout(Duration::from_secs(5), inbox.recv()).await.unwrap().unwrap();
+    let mut sent = Vec::new();
+    for _ in 0..50 {
+        sent = http.received_requests().await.unwrap().iter().filter(|r| r.url.path().ends_with("/messages")).map(|r| serde_json::from_slice::<Value>(&r.body).unwrap()).collect();
+        if !sent.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(sent.len(), 1, "相邻文字合并为一条补发");
+    assert_eq!((sent[0]["msg_id"].clone(), sent[0]["content"].clone()), (json!("MSG9"), json!("后台结果一
+
+后台结果二")));
+    // 已发出的文字与已不存在的文件被确认删除；上传失败的文件及其后的文字原样保留到下次
+    let mut left = Vec::new();
+    for _ in 0..50 {
+        left = store.outbox_list("qq").await.unwrap();
+        if left.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(left.len(), 2, "{left:?}");
+    assert!(left[0].payload["media"].as_str().unwrap().ends_with(".png") && left[1].payload["text"] == "后台结果三");
+    runner.abort();
 }

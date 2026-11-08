@@ -254,9 +254,16 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料
 - crate `qya-orchestra`：`Supervisor`（派出、续接、停止、列表）+ 工具 `delegate`、`agent_ctl`（唐语歌用）、`report_progress`（执行者用，每个执行者一份实例）。模型客户端经可注入的 `ProviderFn` 获取，便于测试。
 - 执行者系统提示：`assets/agents/worker.md`（角色说明 + Hermes SOUL 的工作风格 + 汇报要求 ≤400 字）。专员额外追加“你的身份”（专长说明）与“你的长期记忆”（`<memory_dir>/<memory>`，如 ops.md、creator.md）。
 - fork：worker 会话的 `fork_entry` 指向唐语歌当时的叶子（即带 delegate 调用的那条 assistant 消息），首条输入先补该调用的工具结果“（这件事已交给后台执行者处理）”，再给执行者指令，保证消息结构合法。系统段不同，因此 fork 继承的是上下文而不是缓存前缀。专员不支持 fork，自动按 brief 处理并在回执中说明。
-- 结果回传：执行者结束后经通道交回 `WorkerReport`（摘要上限 1200 字作为保险，提示词要求 400 字）；运行时把它包装成 `〔后台结果：…〕` 消息交给唐语歌的 Pacer：`relay` 走与普通消息相同的处置（空闲则去抖后开一轮，工具阶段则插话），`silent` 只进缓冲等阿颜下次说话。该消息会落入唐语歌的会话树，她之后仍记得结果；执行者产出的媒体随她那一轮的回复发出。偏离原设计（尾注入摘要）的原因：落库后可被后续轮次引用，且不需要单独的信箱状态机。QQ 主动消息额度的约束在任务 13 接入。
+- 结果回传：执行者结束后交回 `WorkerReport`（摘要上限 1200 字作为保险，提示词要求 400 字）；运行时把它包装成 `〔后台结果：…〕` 消息交给唐语歌。该消息会落入唐语歌的会话树，她之后仍记得结果；执行者产出的媒体随她那一轮的回复发出。偏离原设计（尾注入摘要）的原因：落库后可被后续轮次引用。可靠投递见下一条。
+- 先存后投（2026-11-08，借鉴 DeepSeek super-agent 的 stored work）：
+  - 派出：`delegate` / 续接返回成功之前，任务正文与运行标记（`sessions.run_owner` = 汇报收件会话）在同一事务写入（`Store::begin_run`），落库与随后的驱动在同一个后台任务里完成，调用方中途被取消也不会留下没人驱动的任务。占用执行者（`enqueue_or_claim`）与“运行中则排进插话/追问队列”在同一把锁内完成；给运行中执行者的插话/追问同时写入 `run_queue`。
+  - 结束：汇报写入 `mailbox` 并在同一事务清掉运行标记（失败短暂重试），之后才公开结束状态；若此刻队列里还有后到的插话或追问，在同一会话上接着跑一轮（循环驱动，`run_queue` 在下一轮 `begin_run` 时清空）；被要求停止的（包括汇报落库期间才到的 stop）只把它们写进会话，不再执行。每次运行固定自己的收件会话。
+  - 交付：运行时把汇报放进单独的队列（不走插话通道），只在唐语歌一轮开始时整体取用；`TurnOutcome.inputs_saved` 为真（该轮输入已落库）才确认删除信件，否则放回队首（被打断时从未消费输入中去掉这些汇报，避免重复）；出错或 `/stop` 时改为静默，等阿颜下次说话再带上。按信件 id 去重。模型错误由内核以 `StopReason::Error` 连同错误交回（输入已落库），存储等内部错误才以 `Err` 返回。确认的含义是“汇报已进入唐语歌的会话”；之后她的回复若发送失败，按普通回复处理，不再补投汇报。
+  - 重启：`Runtime::open` 在接入平台与启动定时任务之前调用 `Supervisor::recover`，把仍带运行标记、或还有插话残留的执行者逐条转成“被中断”汇报（先把 `run_queue` 里会话中还没有的插话写回会话（与入队后落库的同内容条目一对一抵消），再写汇报并清标记，每条单独提交，中途退出不漏；只有残留且都已处理过的不报告），再装载全部未确认汇报。退出时不主动取消后台任务，避免误报成“被要求停止”。投递语义为至少一次：确认与删除是独立步骤，恰在其间退出可能重复转述一次。
+  - 媒体：每日媒体清理跳过未确认汇报、发件箱与等待随回复发出的文件；模型出错的一轮不投递回复，后台媒体留给下一轮。
+  - 执行者可调用 `need_decision` 提出一个需要阿颜拍板的问题，汇报状态为“等阿颜决定”，唐语歌单独转达；续接已有任务可使用一个预留并发名额，不排在新任务后面。
 - 并发：信号量限制同时运行数（默认 3），超出的排队并在 `/agents` 显示“排队中”；worker 工具集不含 delegate，嵌套深度为 1。
-- 配置 `[orchestra]`：`default_model`（kimi-for-coding）、`default_effort`（high）、`max_concurrent`、`worker_prompt`、`worker_tools`、`[orchestra.specialists.<名>]`（description、model、effort、tools、memory）。
+- 配置 `[orchestra]`：`default_model`（kimi-for-coding）、`default_effort`（high）、`max_concurrent`、`worker_prompt`、`worker_tools`、`[orchestra.specialists.<名>]`（description、model、effort、tools、memory）。专员不写 model/effort 时跟随默认值；现网唐语歌为 `k3-256k`/low，执行者与 ops、creator 专员均为 `kimi-for-coding`/high（2026-11-08 起），派活时显式指定的模型与思考等级优先。
 - 命令：`/agents`、`/agent <id>`（详情 + 最近回复）、`/agent <id> stop`、`/agent <id> <话>`（运行中插话，已结束续接）。
 - 实测（CLI）：委派写回文函数并如实转述“环境无 cargo 未实跑测试”；“刚才那个再改改”时唐语歌选择 `agent_ctl continue` 续接同一 worker；ops 专员依据迁移来的记忆回答博客同步要点并标注待核实项；整段对话累计缓存命中 82%，内存 24 MB。
 
@@ -387,7 +394,7 @@ pub trait Platform: Send + Sync {
 - 鉴权：`POST https://bots.qq.com/app/getAppAccessToken {appId, clientSecret}`，到期前 60 s 刷新；网关 4004 时作废重取。API 头 `Authorization: QQBot <token>`，基址 `https://api.sgroup.qq.com`。
 - 网关：`GET /gateway` 取 wss 地址；Hello(op10) 后按间隔 80% 发心跳 `{"op":1,"d":<最新 seq>}`；有 session_id 与 seq 时 Resume(op6)，否则 Identify(op2，intents = 1<<25 | 1<<30 | 1<<12 | 1<<26，与 Hermes 现网一致）；op7 重连并 Resume；op9 不可恢复时清会话重新 Identify。致命关闭码 4001/4002/4010/4011/4012/4013/4014/4914/4915 停止重连并让进程退出（由 systemd 处理）；4006/4007 清会话；4008 等 60 s；其余按 1/2/5/10/30/60 s 退避，连接稳定超过 60 s 后退避归零；连接关闭时立即返回进入重连，不空转。
 - 入站：只处理 `C2C_MESSAGE_CREATE`，只接受 `allowed_users`，按 msg_id 去重（最近 200 条）。附件在后台下载（不阻塞心跳）：图片落盘并以 `file://` 引用，请求时才由传输层转为 data URI（数据库不存 base64，缓存清理后显示“已清理”）；语音取 `asr_refer_text`；视频与文件落盘并在文字中写明路径。
-- 出站路由（`reply::ReplyState`）：以阿颜最近一条消息为锚点被动回复（窗口 60 分钟、最多 5 次、msg_seq 1..5 递增）→ 主动消息许可事件的 event_id → 主动消息（每月额度，计数持久化在 kv `qq_proactive:YYYY-MM`，北京时间）→ 都不可用时缓存，阿颜下次说话时合并补发（进程内缓存，重启会丢失）。主动消息被拒（Forbidden）同样转为缓存。
+- 出站路由（`reply::ReplyState`）：以阿颜最近一条消息为锚点被动回复（窗口 60 分钟、最多 5 次、msg_seq 1..5 递增）→ 主动消息许可事件的 event_id → 主动消息（每月额度，计数持久化在 kv `qq_proactive:YYYY-MM`，北京时间）→ 都不可用时写入 SQLite 发件箱（`outbox` 表，文字与每个媒体各占一条，上限 50 条），阿颜下次说话后在后台补发：文字入箱前按 1500 字切块，相邻文字合并为不超过 1500 字的批次，逐批确认；合并后被判超长则逐条重发，单条仍被拒则保留；文件已不存在则跳过，上传失败或再次没有通道则保留到下次；补发串行执行，不阻塞网关收包。主动消息被拒（Forbidden）同样转入发件箱。出站逻辑在 `qq/courier.rs`。
 - 富媒体：本地文件 base64 内联上传 `POST /v2/users/{openid}/files`（≤9 MB，类型按扩展名 1 图片 / 2 视频 / 3 语音 / 4 文件），再以 msg_type 7 发送 `file_info`。超过 9 MB 的文件暂不支持（Hermes 的分片上传未移植，记为待办）。QQ 是否接受 WAV 作为语音未经实测：语音上传被拒时自动改按文件发送。
 - 运行：`qya --qq`；SIGTERM/Ctrl+C 优雅退出。
 - 验证边界：协议由本地 WebSocket + wiremock 契约测试覆盖（Identify 载荷、READY、心跳 seq、过滤与去重、op7 后 Resume、被动回复 msg_id/msg_seq、媒体上传、致命关闭码、主动额度计数）；真实 QQ 只能在一次性切换时验收。
@@ -406,9 +413,11 @@ pub trait Platform: Send + Sync {
 
 | 表 | 用途 |
 |---|---|
-| `sessions` | id、kind(persona/worker/specialist)、parent_session、fork_entry、model、effort、status、leaf_id、created/updated |
+| `sessions` | id、kind(persona/worker/specialist)、parent_session、fork_entry、model、effort、status、leaf_id、run_owner（执行者运行标记）、created/updated |
 | `entries` | 会话树条目（见 5.3） |
-| `mailbox` | worker → 唐语歌的结果信箱 |
+| `mailbox` | 执行者 → 唐语歌的汇报信箱（未确认的汇报，确认后删除） |
+| `outbox` | 平台发件箱（暂时没有投递通道的出站消息） |
+| `run_queue` | 交给运行中执行者、尚未确定写进其会话的插话/追问 |
 | `expressions` | 表达/黑话库 |
 | `cron_jobs` | 定时任务 |
 | `quota` | QQ 主动消息额度计数 |
@@ -457,7 +466,7 @@ pub trait Platform: Send + Sync {
 - 模型：错误正文读取有期限并响应取消；SSE 未换行残余上限 8 MB，工具调用索引上限 128。
 - QQ：连接 20 秒、Hello 30 秒期限；心跳连续两次未收到 ACK 即重连；拒收事件同时清除旧事件锚点；延迟队列上限 50 条，补发失败放回队列；`allowed_users` 必须恰好一个（单用户设计）。
 - 抖音：响应缺字段不再 panic；发码请求被取消时守卫复位收码状态；发码结果非 ready 时报告失败而不是“已请求发码”。
-- 未采纳或推迟：模型 shell 与抖音 socket 的权限隔离（运行用户本就有免密 sudo，隔离需要另设执行用户，属架构调整）；SQLite 读写分离与维护调度、按压缩点裁剪历史读取、QQ 补发移出网关循环、附件下载并发与大小限制、主动额度原子计数（当前发送基本串行）。
+- 未采纳或推迟：模型 shell 与抖音 socket 的权限隔离（运行用户本就有免密 sudo，隔离需要另设执行用户，属架构调整）；SQLite 读写分离与维护调度、按压缩点裁剪历史读取、附件下载并发与大小限制、主动额度原子计数（当前发送基本串行）。QQ 补发已于同日改为发件箱 + 后台串行补发（见 9.1）。
 
 ## 13. 构建与部署
 

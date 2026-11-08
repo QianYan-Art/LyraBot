@@ -98,6 +98,10 @@ pub struct TurnOutcome {
     pub media: Vec<std::path::PathBuf>,
     /// 尚未得到任何模型回应就被取消的输入（未落库），由调用方决定是否重新排队
     pub unconsumed: Vec<Message>,
+    /// 本轮开始时传入的输入是否已经落库（得到过模型回应，或模型出错时为保留记录而写入）
+    pub inputs_saved: bool,
+    /// `reason == Error` 时的模型错误；存储等内部错误仍以 `Err` 返回
+    pub error: Option<LlmError>,
 }
 
 #[derive(Clone)]
@@ -152,6 +156,7 @@ impl Kernel {
         cancel: CancellationToken,
     ) -> Result<TurnOutcome> {
         self.emit(AgentEvent::TurnStart { session });
+        let mut inputs_saved = input.is_empty();
         let mut unpersisted = input;
         let mut usage = Usage::default();
         let mut media = Vec::new();
@@ -160,6 +165,7 @@ impl Kernel {
         let mut last_sig: Option<String> = None;
         let mut repeats = 0u32;
         let mut last_prompt_tokens = 0u64;
+        let mut error = None;
 
         let outcome_reason = loop {
             if cancel.is_cancelled() {
@@ -192,12 +198,13 @@ impl Kernel {
                 Ok(c) => c,
                 Err(e) if e.kind == ErrorKind::Cancelled => break StopReason::Cancelled,
                 Err(e) => {
-                    // 出错时保留用户输入，避免对话记录丢失
+                    // 出错时保留输入，避免对话记录丢失；错误随结果交回，调用方据 inputs_saved 判断输入去向
                     for m in unpersisted.drain(..) {
                         self.persist(session, &m).await?;
                     }
-                    self.emit(AgentEvent::TurnEnd { session, reason: StopReason::Error, text: e.to_string() });
-                    return Err(e.into());
+                    inputs_saved = true;
+                    error = Some(e);
+                    break StopReason::Error;
                 }
             };
             usage.add(&completion.usage);
@@ -207,6 +214,7 @@ impl Kernel {
             for m in unpersisted.drain(..) {
                 self.persist(session, &m).await?;
             }
+            inputs_saved = true;
             self.persist(session, &assistant).await?;
             let text = assistant.text();
             if !text.is_empty() {
@@ -249,8 +257,9 @@ impl Kernel {
             unpersisted.extend(Queues::drain(&queues.steer));
         };
 
-        self.emit(AgentEvent::TurnEnd { session, reason: outcome_reason, text: last_text.clone() });
-        Ok(TurnOutcome { reason: outcome_reason, text: last_text, usage, media, unconsumed: unpersisted })
+        let end_text = error.as_ref().map_or_else(|| last_text.clone(), ToString::to_string);
+        self.emit(AgentEvent::TurnEnd { session, reason: outcome_reason, text: end_text });
+        Ok(TurnOutcome { reason: outcome_reason, text: last_text, usage, media, unconsumed: unpersisted, inputs_saved, error })
     }
 
     async fn context(&self, session: SessionId) -> Result<Vec<CtxMessage>> {

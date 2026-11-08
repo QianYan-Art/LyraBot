@@ -1,17 +1,19 @@
-//! 编排行为测试：假 Provider + 临时配置，覆盖 fork/brief、模型校验、专员排队、并发上限、停止与续接。
+//! 编排行为测试：假 Provider + 临时配置，覆盖 fork/brief、模型校验、专员排队、并发上限、停止与续接、
+//! 汇报先落库、重启后发现中断任务、need_decision 结构化提问、续接使用预留名额。
 use async_trait::async_trait;
 use qya_agent::{Kernel, KernelConfig, ToolRegistry};
 use qya_config::ConfigHandle;
 use qya_core::{Message, Role, ToolCall, Usage};
 use qya_llm::{ChatRequest, Completion, EventRx, FinishReason, LlmError, Provider, RemoteModel, StreamEvent};
 use qya_orchestra::{ContextMode, DelegateRequest, Notify, Supervisor, Target, WorkerReport, WorkerStatus};
-use qya_store::{EntryKind, NewSession, SessionStatus, Store};
+use qya_store::{EntryKind, NewSession, SessionKind, SessionStatus, Store};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// 每次请求延迟 `delay` 后回复“完成：<最后一条用户消息前 10 字>”，并记录请求。
+/// 任务里含“【问】”且还没有工具结果时，先调用 need_decision。
 struct Fake {
     delay: Duration,
     requests: Mutex<Vec<ChatRequest>>,
@@ -30,8 +32,15 @@ impl Provider for Fake {
             _ = cancel.cancelled() => return Err(LlmError::new(qya_llm::ErrorKind::Cancelled, "cancel")),
         }
         let (tx, rx) = mpsc::channel(2);
-        let text = format!("完成：{}", last.chars().take(10).collect::<String>());
-        let c = Completion { message: Message::assistant(text), usage: Usage::default(), finish: FinishReason::Stop };
+        let asked = self.requests.lock().unwrap().last().is_some_and(|r| r.messages.iter().any(|m| m.role == Role::Tool));
+        let c = if last.contains("【问】") && !asked {
+            let mut m = Message::with_parts(Role::Assistant, vec![]);
+            m.tool_calls.push(ToolCall { id: "q1".into(), name: "need_decision".into(), arguments: r#"{"question":"用方案A还是B？"}"#.into() });
+            Completion { message: m, usage: Usage::default(), finish: FinishReason::ToolCalls }
+        } else {
+            let text = format!("完成：{}", last.chars().take(10).collect::<String>());
+            Completion { message: Message::assistant(text), usage: Usage::default(), finish: FinishReason::Stop }
+        };
         tx.send(Ok(StreamEvent::Completed(c))).await.unwrap();
         Ok(rx)
     }
@@ -207,7 +216,7 @@ async fn stop_and_continue() {
     assert_eq!(r.status, WorkerStatus::Cancelled);
     assert!(e.sup.stop(id).is_err());
     // 已结束的任务可以续接，在原会话上继续
-    let ack = e.sup.continue_worker(id, "换个思路再试").await.unwrap();
+    let ack = e.sup.continue_worker(id, "换个思路再试", e.persona).await.unwrap();
     assert!(ack.contains("续接"));
     tokio::time::sleep(Duration::from_millis(50)).await;
     e.sup.stop(id).unwrap();
@@ -215,5 +224,109 @@ async fn stop_and_continue() {
     assert_eq!(r2.id, id);
     let reqs = e.fake.requests.lock().unwrap().clone();
     assert!(reqs.last().unwrap().messages.iter().any(|m| m.text() == "任务：很慢的活"));
-    assert!(e.sup.continue_worker(e.persona, "x").await.is_err(), "唐语歌会话不是后台任务");
+    assert!(e.sup.continue_worker(e.persona, "x", e.persona).await.is_err(), "唐语歌会话不是后台任务");
+}
+
+#[tokio::test]
+async fn report_is_mailed_and_restart_recovers_interrupted() {
+    let mut e = env(3, 200).await;
+    e.sup.delegate(req(e.persona, "查日志", ContextMode::Fresh, Target::Worker)).await.unwrap();
+    // delegate 返回时任务正文与运行标记已经落库：此刻退出也能在重启后发现
+    let marked = e.store.running_markers().await.unwrap();
+    assert_eq!(marked.len(), 1);
+    assert!(e.store.branch(marked[0].worker).await.unwrap()[0].payload.to_string().contains("任务：查日志"));
+    let r = next(&mut e.reports).await;
+    assert!(e.store.running_markers().await.unwrap().is_empty(), "汇报落库时清掉标记");
+    // 汇报先落库，确认前一直在信箱里，可原样还原
+    let mail = e.store.pending_mail().await.unwrap();
+    assert_eq!((mail.len(), mail[0].id), (1, r.mail));
+    let restored = WorkerReport::from_mail(&mail[0]).unwrap();
+    assert_eq!((restored.id, restored.status, restored.summary.clone()), (r.id, WorkerStatus::Done, r.summary.clone()));
+    e.store.ack_mail(vec![r.mail]).await.unwrap();
+
+    // 模拟进程在执行中退出：运行标记残留，任务已写进会话
+    let lost = e.store.create_session(NewSession { kind: Some(SessionKind::Worker), name: Some("发周报".into()), model: "m1".into(), effort: "high".into(), ..Default::default() }).await.unwrap();
+    e.store.begin_run(lost, e.persona, vec![]).await.unwrap();
+    assert_eq!(e.sup.recover().await.unwrap(), 1);
+    assert_eq!(e.sup.recover().await.unwrap(), 0, "只报告一次");
+    let mail = e.store.pending_mail().await.unwrap();
+    let r = WorkerReport::from_mail(&mail[0]).unwrap();
+    assert_eq!((r.id, r.status, r.title.as_str()), (lost, WorkerStatus::Interrupted, "发周报"));
+    assert_eq!(e.store.session(lost).await.unwrap().status, SessionStatus::Archived);
+}
+
+#[tokio::test]
+async fn need_decision_is_reported_as_question() {
+    let mut e = env(3, 10).await;
+    e.sup.delegate(req(e.persona, "迁移数据库【问】", ContextMode::Fresh, Target::Worker)).await.unwrap();
+    let r = next(&mut e.reports).await;
+    assert_eq!(r.status, WorkerStatus::Waiting);
+    assert_eq!(r.question.as_deref(), Some("用方案A还是B？"));
+    // 续接时问题清空，正常完成
+    e.sup.continue_worker(r.id, "用A", e.persona).await.unwrap();
+    let r2 = next(&mut e.reports).await;
+    assert_eq!((r2.status, r2.question), (WorkerStatus::Done, None));
+}
+
+#[tokio::test]
+async fn continuation_uses_spare_slot_when_full() {
+    let mut e = env(1, 300).await;
+    e.sup.delegate(req(e.persona, "旧任务", ContextMode::Fresh, Target::Worker)).await.unwrap();
+    let old = next(&mut e.reports).await.id;
+    e.sup.delegate(req(e.persona, "占满并发", ContextMode::Fresh, Target::Worker)).await.unwrap();
+    e.sup.delegate(req(e.persona, "排队新任务", ContextMode::Fresh, Target::Worker)).await.unwrap();
+    e.sup.continue_worker(old, "接着做", e.persona).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let list = e.sup.list().await;
+    let status = |id| list.iter().find(|w| w.id == id).unwrap().status;
+    assert_eq!(status(old), WorkerStatus::Running, "阿颜的续接不排在新任务后面");
+    assert_eq!(list.iter().filter(|w| w.status == WorkerStatus::Queued).count(), 1);
+    for _ in 0..3 {
+        next(&mut e.reports).await;
+    }
+}
+
+#[tokio::test]
+async fn message_arriving_while_finishing_runs_another_turn() {
+    let mut e = env(3, 150).await;
+    e.sup.delegate(req(e.persona, "第一件事", ContextMode::Fresh, Target::Specialist("ops".into()))).await.unwrap();
+    // 第一轮还在跑：再派的任务排进追问队列；即使它在本轮最后一次检查之后才到，收尾时也会接着跑
+    tokio::time::sleep(Duration::from_millis(140)).await;
+    let ack = e.sup.delegate(req(e.persona, "第二件事", ContextMode::Brief, Target::Specialist("ops".into()))).await.unwrap();
+    assert!(ack.contains("排在"), "{ack}");
+    let mut texts = Vec::new();
+    while !texts.iter().any(|t: &String| t.contains("第二件事")) {
+        texts.push(next(&mut e.reports).await.summary);
+    }
+    assert_eq!(e.sup.running(), 0);
+}
+
+#[tokio::test]
+async fn stopped_run_keeps_late_messages_without_rerunning() {
+    let mut e = env(3, 2_000).await;
+    e.sup.delegate(req(e.persona, "很慢的活", ContextMode::Fresh, Target::Worker)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let id = e.sup.list().await[0].id;
+    // 运行中插话（同时落库），随后停止：插话不应再触发新一轮
+    assert!(e.sup.continue_worker(id, "顺便查下磁盘", e.persona).await.unwrap().contains("插给"));
+    e.sup.stop(id).unwrap();
+    assert_eq!(next(&mut e.reports).await.status, WorkerStatus::Cancelled);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(e.sup.running(), 0, "停止后不自动续跑");
+    assert!(e.reports.try_recv().is_err());
+    let branch = e.store.branch(id).await.unwrap();
+    assert!(branch.iter().any(|en| en.payload.to_string().contains("顺便查下磁盘")), "插话写进了会话");
+}
+
+#[tokio::test]
+async fn recover_restores_queued_messages_into_session() {
+    let e = env(3, 10).await;
+    let w = e.store.create_session(NewSession { kind: Some(SessionKind::Worker), name: Some("整理日志".into()), model: "m1".into(), effort: "high".into(), ..Default::default() }).await.unwrap();
+    e.store.begin_run(w, e.persona, vec![(serde_json::to_value(Message::user("任务：整理日志")).unwrap(), 1)]).await.unwrap();
+    e.store.queue_input(w, e.persona, serde_json::to_value(Message::user("只看昨天的")).unwrap(), 1).await.unwrap();
+    assert_eq!(e.sup.recover().await.unwrap(), 1);
+    let texts: Vec<String> = e.store.branch(w).await.unwrap().iter().map(|en| en.payload.to_string()).collect();
+    assert!(texts.last().unwrap().contains("只看昨天的"), "{texts:?}");
+    let r = WorkerReport::from_mail(&e.store.pending_mail().await.unwrap()[0]).unwrap();
+    assert!(r.summary.contains("1 条补充"), "{}", r.summary);
 }

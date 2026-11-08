@@ -1,4 +1,4 @@
-//! 编排相关工具：唐语歌用的 delegate / agent_ctl，执行者用的 report_progress。
+//! 编排相关工具：唐语歌用的 delegate / agent_ctl，执行者用的 report_progress / need_decision。
 
 use crate::supervisor::{ContextMode, DelegateRequest, Handle, Notify, Supervisor, Target, WorkerKind};
 use async_trait::async_trait;
@@ -154,12 +154,12 @@ impl Tool for AgentCtlTool {
     fn spec(&self) -> &ToolSpec {
         &self.spec
     }
-    async fn call(&self, _ctx: ToolCtx, args: Value) -> ToolOutput {
+    async fn call(&self, ctx: ToolCtx, args: Value) -> ToolOutput {
         let id = args.get("id").and_then(Value::as_i64);
         let r = match s(&args, "action") {
             Some("status") => Ok(render_list(&self.sup.list().await)),
             Some("continue") => match (id, s(&args, "message")) {
-                (Some(id), Some(m)) => self.sup.continue_worker(id, m).await,
+                (Some(id), Some(m)) => self.sup.continue_worker(id, m, ctx.session).await,
                 _ => Err("continue 需要 id 和 message".into()),
             },
             Some("stop") => match id {
@@ -212,6 +212,47 @@ impl Tool for ReportProgress {
                 ToolOutput::ok("已记录")
             }
             None => ToolOutput::err("缺少 progress"),
+        }
+    }
+}
+
+/// 执行者提出需要阿颜拍板的问题；汇报时单独交给唐语歌原样转达。
+pub(crate) struct NeedDecision {
+    handle: Arc<Handle>,
+    spec: ToolSpec,
+}
+
+impl NeedDecision {
+    pub(crate) fn new(handle: Arc<Handle>) -> Self {
+        let spec = ToolSpec {
+            name: "need_decision".into(),
+            description: "只有必须由阿颜拍板才能继续时调用（例如二选一的方案、要不要执行不可撤回的操作）：写一个具体、能直接回答的问题，可列选项。调用后收尾本轮，汇报里写清已完成的部分，不必重复这个问题。已经被授权的事不要再问。".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"question": {"type": "string"}},
+                "required": ["question"],
+                "additionalProperties": false
+            }),
+        };
+        Self { handle, spec }
+    }
+}
+
+#[async_trait]
+impl Tool for NeedDecision {
+    fn spec(&self) -> &ToolSpec {
+        &self.spec
+    }
+    fn concurrency(&self) -> Concurrency {
+        Concurrency::Shared
+    }
+    async fn call(&self, _ctx: ToolCtx, args: Value) -> ToolOutput {
+        match s(&args, "question").map(str::trim).filter(|q| !q.is_empty()) {
+            Some(q) => {
+                self.handle.set_question(q);
+                ToolOutput::ok("已记录，会随汇报交给阿颜。现在收尾本轮。")
+            }
+            None => ToolOutput::err("缺少 question"),
         }
     }
 }

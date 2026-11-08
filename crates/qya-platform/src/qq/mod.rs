@@ -2,19 +2,21 @@
 //!
 //! 网关：Hello(op10) → Identify(op2)/Resume(op6) → READY；按服务端间隔 80% 发送心跳(op1)；
 //! op7 重连并 Resume，op9 按是否可恢复决定 Resume 或重新 Identify；致命关闭码停止重连。
-//! 只接受配置中的 user_openid；出站按 [`reply::ReplyState`] 选择被动/主动/延迟。
+//! 只接受配置中的 user_openid；出站见 [`courier`]：按 [`reply::ReplyState`] 选择通道，没有通道时写入发件箱。
 
 pub mod api;
+mod courier;
 pub mod inbound;
 pub mod reply;
 
-use crate::{Inbound, Outbound, Platform, PlatformCaps, PlatformId, SendError, SendErrorKind, SendResult, anyhow_like};
-use api::{Api, MSG_TYPE_MEDIA, MSG_TYPE_TEXT, file_type_for};
+use crate::{Inbound, Outbound, Platform, PlatformCaps, PlatformId, SendErrorKind, SendResult, anyhow_like};
+use api::Api;
 use async_trait::async_trait;
+use courier::Courier;
 use futures_util::{SinkExt, StreamExt};
 use qya_config::QqConfig;
 use qya_store::Store;
-use reply::{ReplyState, Route};
+use reply::ReplyState;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -42,19 +44,16 @@ struct Session {
     seq: Option<u64>,
 }
 
-struct State {
+/// 入站与出站共享的回复状态。
+pub(crate) struct State {
     reply: ReplyState,
-    deferred: Vec<Outbound>,
     seen: VecDeque<String>,
 }
 
-/// 延迟投递队列上限。
-const MAX_DEFERRED: usize = 50;
-
 pub struct QqPlatform {
     api: Arc<Api>,
-    store: Store,
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
+    courier: Arc<Courier>,
     session: tokio::sync::Mutex<Session>,
 }
 
@@ -62,18 +61,15 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-fn quota_key() -> String {
-    let tz = jiff::tz::TimeZone::get("Asia/Shanghai").unwrap_or(jiff::tz::TimeZone::fixed(jiff::tz::offset(8)));
-    format!("qq_proactive:{}", jiff::Timestamp::now().to_zoned(tz).strftime("%Y-%m"))
-}
-
 impl QqPlatform {
     pub fn new(cfg: QqConfig, store: Store) -> Self {
         let reply = ReplyState::new(cfg.reply_window_min, cfg.max_replies);
+        let api = Arc::new(Api::new(cfg));
+        let state = Arc::new(Mutex::new(State { reply, seen: VecDeque::new() }));
         Self {
-            api: Arc::new(Api::new(cfg)),
-            store,
-            state: Mutex::new(State { reply, deferred: Vec::new(), seen: VecDeque::new() }),
+            courier: Arc::new(Courier::new(api.clone(), store, state.clone())),
+            api,
+            state,
             session: tokio::sync::Mutex::new(Session::default()),
         }
     }
@@ -82,22 +78,8 @@ impl QqPlatform {
         self.state.lock().expect("qq 状态锁中毒")
     }
 
-    /// 加入延迟队列；超过上限时丢弃最旧的一条，避免长期无窗口时无界增长。
-    fn defer(&self, out: Outbound) {
-        let mut st = self.st();
-        st.deferred.push(out);
-        if st.deferred.len() > MAX_DEFERRED {
-            st.deferred.remove(0);
-            tracing::warn!("延迟队列已满，丢弃最旧的一条");
-        }
-    }
-
     fn openid(&self) -> &str {
         &self.api.cfg().allowed_users[0]
-    }
-
-    async fn quota_used(&self) -> u32 {
-        self.store.kv_get(&quota_key()).await.ok().flatten().and_then(|v| v.parse().ok()).unwrap_or(0)
     }
 
     /// 一次网关会话：连接、鉴权、收发，直到断开。正常需要重连时返回 Ok。
@@ -277,67 +259,9 @@ impl QqPlatform {
             }
             let _ = inbox.send(Inbound { platform: PlatformId::Qq, user: p.openid.clone(), parts, msg_id: Some(p.msg_id.clone()) }).await;
         });
-        // 有了新的被动回复窗口，把之前没发出的消息补发
-        let deferred = std::mem::take(&mut self.st().deferred);
-        if !deferred.is_empty() {
-            let text = deferred.iter().map(|o| o.text.trim()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
-            let media = deferred.into_iter().flat_map(|o| o.media).collect();
-            tracing::info!("补发此前延迟的 QQ 消息");
-            let out = Outbound { text, media, reply_to: None };
-            if let Err(e) = self.send(out.clone()).await {
-                // 文字没发出去：放回延迟队列最前，下次阿颜说话时再补
-                tracing::warn!(error = %e.message, "补发失败，保留到下次");
-                self.st().deferred.insert(0, out);
-            }
-        }
-    }
-
-    /// 选择通道并发送一段载荷。`Ok(false)` 表示已延迟。
-    async fn deliver(&self, body: Value, fallback: &Outbound) -> Result<bool, SendError> {
-        let quota = self.api.cfg().proactive_monthly_quota;
-        let used = self.quota_used().await;
-        let route = self.st().reply.route(now_ms(), used < quota);
-        let openid = self.openid().to_owned();
-        let res = match &route {
-            Route::Passive { msg_id, seq } => self.api.send_c2c(&openid, body, Some(("msg_id", msg_id, *seq))).await,
-            Route::Event { event_id, seq } => self.api.send_c2c(&openid, body, Some(("event_id", event_id, *seq))).await,
-            Route::Proactive => self.api.send_c2c(&openid, body, None).await,
-            Route::Defer => {
-                tracing::info!("没有可用的 QQ 回复通道（被动窗口已过且主动额度用尽），延迟到阿颜下次说话");
-                self.defer(fallback.clone());
-                return Ok(false);
-            }
-        };
-        match res {
-            Ok(_) => {
-                if route == Route::Proactive {
-                    let _ = self.store.kv_set(&quota_key(), &(used + 1).to_string()).await;
-                }
-                Ok(true)
-            }
-            Err(e) if route == Route::Proactive && e.kind == SendErrorKind::Forbidden => {
-                tracing::warn!(error = %e.message, "主动消息被拒绝，延迟投递");
-                self.defer(fallback.clone());
-                Ok(false)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn send_media(&self, path: &std::path::Path) -> Result<bool, SendError> {
-        let openid = self.openid().to_owned();
-        let ft = file_type_for(path);
-        let file_info = match self.api.upload(&openid, path, ft).await {
-            Ok(f) => f,
-            // QQ 对语音格式的要求未经实测确认：语音被拒时退回按文件发送，保证送达
-            Err(e) if ft == 3 && matches!(e.kind, SendErrorKind::BadFormat | SendErrorKind::Unknown) => {
-                tracing::warn!(error = %e.message, "语音上传失败，改按文件发送");
-                self.api.upload(&openid, path, 4).await?
-            }
-            Err(e) => return Err(e),
-        };
-        let body = json!({"msg_type": MSG_TYPE_MEDIA, "media": {"file_info": file_info}});
-        self.deliver(body, &Outbound { text: String::new(), media: vec![path.to_owned()], reply_to: None }).await
+        // 有了新的被动回复窗口：在后台补发发件箱里的消息，不阻塞网关的心跳与收包
+        let courier = self.courier.clone();
+        tokio::spawn(async move { courier.flush().await });
     }
 }
 
@@ -381,19 +305,6 @@ impl Platform for QqPlatform {
     }
 
     async fn send(&self, out: Outbound) -> SendResult {
-        let text = out.text.trim();
-        if !text.is_empty() {
-            let body = json!({"msg_type": MSG_TYPE_TEXT, "content": text});
-            self.deliver(body, &Outbound { text: text.to_owned(), media: Vec::new(), reply_to: None }).await?;
-        }
-        for m in &out.media {
-            if let Err(e) = self.send_media(m).await {
-                tracing::warn!(error = %e.message, path = %m.display(), "QQ 媒体发送失败");
-                // 媒体失败时给阿颜一个文字说明，不静默吞掉
-                let note = json!({"msg_type": MSG_TYPE_TEXT, "content": format!("（有个文件没发出去：{}）", e.message)});
-                let _ = self.deliver(note, &Outbound::default()).await;
-            }
-        }
-        Ok(())
+        self.courier.send(out).await
     }
 }

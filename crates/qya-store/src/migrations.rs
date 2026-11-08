@@ -79,6 +79,26 @@ CREATE TABLE kv (
 ALTER TABLE expressions ADD COLUMN triggers TEXT NOT NULL DEFAULT '[]';
 CREATE UNIQUE INDEX idx_expressions_kind_text ON expressions(kind, text);
 "#,
+    // v3：先存后做。执行者运行标记（重启后据此发现被中断的任务）与平台延迟发件箱
+    r#"
+ALTER TABLE sessions ADD COLUMN run_owner INTEGER;   -- 执行者排队或运行中时为汇报收件会话，结束时清空
+CREATE TABLE outbox (
+    id         INTEGER PRIMARY KEY,
+    channel    TEXT NOT NULL,                -- 例：qq
+    payload    TEXT NOT NULL,                -- JSON：{text, media}
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX idx_outbox_channel ON outbox(channel, id);
+CREATE TABLE run_queue (                    -- 交给运行中执行者、尚未确定写进其会话的插话/追问
+    id         INTEGER PRIMARY KEY,
+    worker     INTEGER NOT NULL REFERENCES sessions(id),
+    owner      INTEGER NOT NULL,             -- 汇报收件会话
+    payload    TEXT NOT NULL,                -- 消息 JSON
+    tokens     INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX idx_run_queue_worker ON run_queue(worker, id);
+"#,
 ];
 
 pub fn run(conn: &mut Connection) -> rusqlite::Result<()> {
