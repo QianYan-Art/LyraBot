@@ -907,7 +907,9 @@ impl Runtime {
                 out.hint("切换：/model 名称").build()
             }
             Command::Model(Some(m)) => {
-                model_info(&c, &m)?;
+                if model_info(&c, &m).is_err() {
+                    return Ok(card::warn(format!("模型 {m} 不在模型目录中，发 /model 查看可选模型")));
+                }
                 self.store.update_session(self.session(), Some(m.clone()), None, None).await?;
                 card::ok(format!("唐语歌的模型已切换为 {m}"))
             }
@@ -923,7 +925,6 @@ impl Runtime {
                     .build()
             }
             Command::Effort(Some(e)) => {
-                let e: Effort = e.parse().map_err(anyhow::Error::msg)?;
                 self.store.update_session(self.session(), None, Some(e.to_string()), None).await?;
                 let p = c.provider(&c.persona.provider).context("persona provider 未配置")?;
                 Card::new("✅", &format!("思考等级已切换为 {e}"))
@@ -945,7 +946,7 @@ impl Runtime {
                 let c = self.cfg.reload()?;
                 let kit = PersonaKit::load(&c, &self.sup, &self.memory_lock)?;
                 *self.kit.lock().expect("kit 锁中毒") = Arc::new(kit);
-                Card::new("✅", "配置与人格资产已重新加载").hint("记忆快照在新会话或压缩后生效").build()
+                Card::new("✅", "配置与人格资产已重新加载").hint("改动在新会话或 /compact 后生效").build()
             }
         })
     }
@@ -1050,9 +1051,11 @@ impl Runtime {
 
     /// /agent <id>：基本信息 + 该执行者最近一条回复。
     async fn agent_detail(&self, id: SessionId) -> Result<String> {
-        let row = self.store.session(id).await.with_context(|| format!("没有 #{id}"))?;
+        let Ok(row) = self.store.session(id).await else {
+            return Ok(card::warn(format!("没有后台任务 #{id}，发 /agents 查看列表")));
+        };
         if row.kind == SessionKind::Persona {
-            anyhow::bail!("#{id} 是唐语歌的会话，不是后台任务");
+            return Ok(card::warn(format!("#{id} 是唐语歌的会话，不是后台任务")));
         }
         let info = self.sup.list().await.into_iter().find(|w| w.id == id);
         let status = info.as_ref().map(|w| w.status.label()).unwrap_or("已归档");

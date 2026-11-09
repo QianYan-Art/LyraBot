@@ -109,7 +109,7 @@ impl Runtime {
             return Ok(None);
         }
         if self.learning.swap(true, Ordering::AcqRel) {
-            return Ok(force.then(|| "正在学习中".to_owned()));
+            return Ok(force.then(|| card::warn("后台正在学习中，请稍后再试")));
         }
         let result = self.learn_and_consolidate(session, idle, force).await;
         self.learning.store(false, Ordering::Release);
@@ -129,7 +129,7 @@ impl Runtime {
             done.push(m);
         }
         if done.is_empty() {
-            return Ok(force.then(|| "没有新的消息可学习，也没有待整理的记忆".to_owned()));
+            return Ok(None);
         }
         Ok(Some(done.join("\n")))
     }
@@ -246,7 +246,7 @@ impl Runtime {
                         c.item(format!("{prefix}{} {e}", i + 1));
                     }
                 }
-                c.hint("删除：/learn forget u3 或 m2").hint("改动在新会话或压缩后生效").build()
+                c.hint("删除：/learn forget u3 或 m2").hint("改动在新会话或 /compact 后生效").build()
             }
             LearnCmd::Forget(id) => self.forget(&id).await?,
             LearnCmd::On => {
@@ -265,20 +265,17 @@ impl Runtime {
                     .hint("恢复开启：/learn on")
                     .build()
             }
-            LearnCmd::Now => {
-                let msg = self.learn_once(true).await?.unwrap_or_default();
-                let mut lines = msg.lines();
-                match (lines.next(), lines.next()) {
-                    (Some(first), None) => format!("🌱 {first}"),
-                    _ => {
-                        let mut c = Card::new("🌱", "学习与整理");
-                        for line in msg.lines() {
-                            c.item(line);
-                        }
-                        c.build()
+            LearnCmd::Now => match self.learn_once(true).await? {
+                None => "💤 没有新的消息可学习，也没有待整理的记忆".into(),
+                Some(msg) if msg.starts_with("⚠️") => msg,
+                Some(msg) => {
+                    let mut c = Card::new("✅", "学习与整理完成");
+                    for line in msg.lines() {
+                        c.item(line);
                     }
+                    c.build()
                 }
-            }
+            },
             LearnCmd::Undo => self.undo_consolidation().await?,
         })
     }
@@ -335,7 +332,7 @@ impl Runtime {
         self.write_memory(name, &list)?;
         Ok(Card::new("✅", &format!("已删除记忆 {id}"))
             .item(old)
-            .hint("改动在新会话或压缩后生效")
+            .hint("改动在新会话或 /compact 后生效")
             .build())
     }
 
@@ -358,7 +355,7 @@ impl Runtime {
         let changes: Vec<String> = rev.summary.lines().map(str::to_owned).collect();
         Ok(Card::new("✅", &format!("已撤销 {} 的整理", when(rev.created_at)))
             .item(tally(&changes))
-            .hint("改动在新会话或压缩后生效")
+            .hint("改动在新会话或 /compact 后生效")
             .build())
     }
 }

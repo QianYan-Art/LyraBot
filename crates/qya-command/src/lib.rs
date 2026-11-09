@@ -1,6 +1,7 @@
 //! 聊天命令解析。命令不经过模型，立即响应；帮助文本与解析共用一张表，保证一致。
 //! 完整命令设计见 docs/07-platform-commands.md 第 4 节，后续阶段逐步补齐。
 
+use qya_core::Effort;
 use qya_core::card::Card;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,7 +12,7 @@ pub enum Command {
     Stop,
     Compact,
     Model(Option<String>),
-    Effort(Option<String>),
+    Effort(Option<Effort>),
     Learn(LearnCmd),
     Agents,
     Agent { id: i64, action: AgentAction },
@@ -193,7 +194,10 @@ pub fn parse(input: &str) -> Option<Result<Command, ParseError>> {
         "stop" => no_arg(Command::Stop, "stop"),
         "compact" => no_arg(Command::Compact, "compact"),
         "model" => Ok(Command::Model(arg)),
-        "effort" => Ok(Command::Effort(arg)),
+        "effort" => match arg.as_deref() {
+            None => Ok(Command::Effort(None)),
+            Some(a) => a.parse::<Effort>().map(|e| Command::Effort(Some(e))).map_err(|_| ParseError::BadArgs("effort".into())),
+        },
         "learn" => parse_learn(arg.as_deref()).map(Command::Learn).ok_or_else(|| ParseError::BadArgs("learn".into())),
         "agents" => no_arg(Command::Agents, "agents"),
         "sessions" => match arg.as_deref() {
@@ -323,6 +327,8 @@ mod tests {
         assert_eq!(parse(" /Model  k3-256k "), Some(Ok(Command::Model(Some("k3-256k".into())))));
         assert_eq!(parse("／new"), Some(Ok(Command::New)));
         assert_eq!(parse("/effort"), Some(Ok(Command::Effort(None))));
+        assert_eq!(parse("/effort HIGH"), Some(Ok(Command::Effort(Some(Effort::High)))));
+        assert_eq!(parse("/effort invalid"), Some(Err(ParseError::BadArgs("effort".into()))));
         assert_eq!(parse("/笑"), None, "不是已知命令的照常当聊天");
         assert_eq!(parse("/foo bar"), None);
         assert_eq!(parse("/sessions"), Some(Ok(Command::Sessions(None))));
