@@ -45,10 +45,10 @@ fn custom_persona_minimal_card_without_notes() {
     let dir = std::env::temp_dir().join(format!("qya-custom-persona-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("persona.toml"), "user_name = \"小明\"\n").unwrap();
+    std::fs::write(dir.join("persona.toml"), "user_name = \"小明\"\ncard = \"card.json\"\n").unwrap();
     std::fs::write(
         dir.join("card.json"),
-        r#"{"name":"星野","description":"你是{{char}}，正在陪{{user}}聊天。","personality":"温和","mes_example":"{{user}}: 早\n{{char}}: 早安"}"#,
+        r#"{"spec":"chara_card_v2","spec_version":"2.0","data":{"name":"星野","description":"你是{{char}}，正在陪{{user}}聊天。","personality":"温和","mes_example":"{{user}}: 早\n{{char}}: 早安"}}"#,
     )
     .unwrap();
     let p = Persona::load(&dir).unwrap();

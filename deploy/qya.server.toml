@@ -133,7 +133,7 @@ secret_file = "secrets/qq.secret"
 allowed_users = ["__QQ_OWNER__"]
 reply_window_min = 60       # 被动回复有效期（分钟）
 max_replies = 5             # 单条消息最多被动回复次数
-proactive_monthly_quota = 4 # 每月主动消息额度，用尽后延迟到阿颜下次说话
+proactive_monthly_quota = 4 # 每月主动消息额度，用尽后延迟到用户下次说话
 inbox_dir = "/var/lib/qya/media/inbox"
 
 # 抖音外部服务（docs/06-tools-plugins.md 第 3 节）。服务端允许的调用方为 tangyuge 用户与 qya.service

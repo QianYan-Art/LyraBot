@@ -46,9 +46,9 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料（persona
 | `name` | **必填**（非空） | S1 标题 `# <name>`、身份声明 `你就是<name>本人`，以及替换所有 `{{char}}` |
 | `description` | 选填 | `## 核心描述` |
 | `personality` | 选填 | `## 性格` |
-| `system_prompt` | 选填 | `## 聊天准则`（自动过滤 `{{original}}`、`[Start a new chat]` 等酒馆 UI 指令行） |
-| `mes_example` | 选填 | `## 示例对话`（`<START>` 自动转为 `---` 分隔线，仅作语气参考） |
-| `character_book.entries` | 选填 | 仅提取 `constant == true && enabled == true` 的条目，按 `insertion_order` 排序后拼入 `## 补充设定` |
+| `system_prompt` | 选填 | `## 聊天准则` |
+| `mes_example` | 选填 | `## 示例对话`（仅作语气参考） |
+| `character_book.entries` | 选填 | 仅提取 `constant == true && enabled == true` 且非空的条目，按列表顺序拼入 `## 补充设定` |
 | `first_mes` / `alternate_greetings` 等 | 忽略 | 聊天由用户主动发起，不使用固定开场白 |
 
 #### `persona.toml` 结构与三种配置方式
@@ -56,8 +56,8 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料（persona
 | 字段 | 是否必填 | 说明 |
 |---|---|---|
 | `user_name` | **必填**（非空） | 对用户的称呼，替换所有 `{{user}}`，并用于记忆分区标题（`关于<user_name>`）与学习提示词 |
-| `card` | **必填** | 角色卡路径（相对 `assets/persona/`，通常为 `"card.json"`） |
-| `core` | 选填（默认 `[]`） | 常驻在 S1 `## 角色核心资料` 下的 Markdown 文件列表，适合放每轮必读的核心性格与说话方式 |
+| `card` | 选填（默认 `"card.json"`） | 角色卡路径（相对 `assets/persona/`） |
+| `core` | 选填（默认 `[]`） | 常驻在 S1（位于 `## 聊天准则` 之后、`## 示例对话` 之前）的资料列表，每项为 `{ title = "小节标题", file = "core/xxx.md" }`（文件中的一级标题自动剥离，其余标题降一级） |
 | `runtime_relationship` | 选填 | 关系默认说明（如单用户恋人关系），插入在 `# <name>` 之后、`## 核心描述` 之前 |
 | `runtime_agency` | 选填（**建议保留**） | 默认指向 `"runtime/agency.md"`，定义真实操作以工具为准、轻重活分流（`delegate` / `cron`）与 `〔〕` 系统消息协议，内部已使用 `{{user}}` 占位符 |
 | `[[notes]]` | 选填（默认 `[]`） | 按需资料列表，每项含 `id`（枚举值）、`file`（Markdown 路径）、`use`（何时查阅的一句话说明）。为空时不注册 `persona_notes` 工具 |
@@ -68,20 +68,24 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料（persona
 
 ```toml
 user_name = "主人"
-card = "card.json"
 runtime_agency = "runtime/agency.md"
 ```
 
 **方式二：将原有的 Roleplay Skill（`SKILL.md`）或长设定拆分为 `core` + `[[notes]]`**
 
 若用户除了角色卡，还有一份长篇人物设定、世界书非常驻条目或 Roleplay Skill：
-1. 将**每轮回复都必须遵守**的核心性格、口癖、叙事红线提炼为 1–3 个文件放入 `core/`，填入 `core = ["core/soul.md", ...]`。
+1. 将**每轮回复都必须遵守**的核心性格、口癖、叙事红线提炼为 1–3 个文件放入 `core/`，填入 `core = [{ title = "...", file = "core/..." }, ...]`。
 2. 将**特定话题才需要**的细节（如外貌穿搭、特定情境反应、相处细节、过往经历/世界观设定）按主题拆成 Markdown 文件放入 `notes/`，并在 `persona.toml` 中配置 `[[notes]]`：
 
 ```toml
 user_name = "阿颜"
-card = "card.json"
-core = ["core/soul.md", "core/speech.md", "core/limits.md"]
+
+core = [
+  { title = "内核与驱动", file = "core/soul.md" },
+  { title = "说话方式细节", file = "core/speech.md" },
+  { title = "表达与事实边界", file = "core/limits.md" },
+]
+
 runtime_relationship = "runtime/relationship.md"
 runtime_agency = "runtime/agency.md"
 

@@ -641,7 +641,7 @@ impl Runtime {
             }
             _ => {
                 let msg = format!(
-                    "〔定时提醒 #{}「{}」到点了〕\n{}\n〔这是{uname}之前让你设的提醒，不是他刚说的话。用你自己的话提醒他。〕",
+                    "〔定时提醒 #{}「{}」到点了〕\n{}\n〔这是{uname}之前让你设的提醒，不是刚发的新消息。用你自己的话提醒{uname}。〕",
                     job.id,
                     job.name,
                     action["text"].as_str().unwrap_or_default()

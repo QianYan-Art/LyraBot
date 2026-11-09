@@ -99,7 +99,7 @@ cargo test --workspace
      在 `persona.toml` 中将 `core = []` 置空（或删掉该行），删掉 `runtime_relationship` 行，并删掉所有 `[[notes]]` 段；**保留 `runtime_agency = "runtime/agency.md"`**（该文件只定义通用的工具调用边界、后台派活规则与 `〔〕` 系统消息格式，已用 `{{user}}` 模板化，不含特定角色设定）。当 `[[notes]]` 为空时，运行时会自动不注册 `persona_notes` 工具。
    - **情况 B：用户除了角色卡，还有一份 Roleplay Skill（`SKILL.md`）或长篇补充设定**
      不要把几千上万字的设定全部塞进常驻提示词，请按“常驻 + 按需”两层拆分：
-     - **常驻层（`core/*.md`）**：只放每轮对话都必须遵守的核心性格驱动、说话口癖与边界（建议合计 ≤ 3,000 字），在 `persona.toml` 的 `core = [...]` 中按顺序列出，常驻 S1 缓存前缀。
+     - **常驻层（`core/*.md`）**：只放每轮对话都必须遵守的核心性格驱动、说话口癖与边界（建议合计 ≤ 3,000 字），在 `persona.toml` 的 `core = [{ title = "小节标题", file = "core/xxx.md" }, ...]` 中按顺序列出，常驻 S1 缓存前缀。
      - **按需层（`notes/*.md` + `[[notes]]`）**：把外貌穿搭、特定情境反应、人际关系细节、过往经历等“聊到相关话题才需要”的设定拆成若干 `.md` 放进 `notes/`，并在 `persona.toml` 中声明 `[[notes]]`（填好 `id`、`file` 与 `use` 查阅时机说明）。程序会根据 `[[notes]]` 动态生成 `persona_notes(topic)` 工具的参数枚举与说明，让模型在聊到对应话题时按需查阅。
    - **情况 C：角色卡内含 SillyTavern 世界书（`character_book`）**
      `constant = true` 且 `enabled = true` 的常驻条目会自动拼入 S1 `## 补充设定`；其余非常驻条目若内容较多，建议按主题整理成 `notes/*.md` 并配置到 `[[notes]]` 中按需读取。

@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 struct Manifest {
     user_name: String,
     #[serde(default)]
+    card: Option<PathBuf>,
+    #[serde(default)]
     core: Vec<CoreRef>,
     #[serde(default)]
     runtime_relationship: Option<PathBuf>,
@@ -98,10 +100,21 @@ impl Assets {
     pub fn load(dir: &Path) -> Result<Self, PersonaError> {
         let manifest: Manifest = toml::from_str(&read(&dir.join("persona.toml"))?)
             .map_err(|e| PersonaError::Invalid(format!("persona.toml：{e}")))?;
-        let card: CharacterCard = serde_json::from_str(&read(&dir.join("card.json"))?)
-            .map_err(|e| PersonaError::Invalid(format!("card.json：{e}")))?;
+        let card_file = manifest.card.as_deref().unwrap_or_else(|| Path::new("card.json"));
+        let raw_card = read(&dir.join(card_file))?;
+        let v: serde_json::Value = serde_json::from_str(&raw_card)
+            .map_err(|e| PersonaError::Invalid(format!("{}：{e}", card_file.display())))?;
+        let target = if v.get("name").and_then(|n| n.as_str()).is_some_and(|s| !s.trim().is_empty()) {
+            v
+        } else if let Some(data) = v.get("data").filter(|d| d.is_object()) {
+            data.clone()
+        } else {
+            v
+        };
+        let card: CharacterCard = serde_json::from_value(target)
+            .map_err(|e| PersonaError::Invalid(format!("{}：{e}", card_file.display())))?;
         if card.name.trim().is_empty() {
-            return Err(PersonaError::Invalid("card.json 缺少 name".into()));
+            return Err(PersonaError::Invalid(format!("{} 缺少 name", card_file.display())));
         }
         let core = manifest
             .core
@@ -113,10 +126,14 @@ impl Assets {
             if notes.iter().any(|x: &Note| x.id == n.id) {
                 return Err(PersonaError::Invalid(format!("notes 条目 id 重复：{}", n.id)));
             }
+            let usage = n
+                .usage
+                .replace("{{user}}", &manifest.user_name)
+                .replace("{{char}}", &card.name);
             let body = body_of(&read(&dir.join(&n.file))?)
                 .replace("{{user}}", &manifest.user_name)
                 .replace("{{char}}", &card.name);
-            notes.push(Note { id: n.id.clone(), usage: n.usage.clone(), body });
+            notes.push(Note { id: n.id.clone(), usage, body });
         }
         let relationship = match &manifest.runtime_relationship {
             Some(p) => read(&dir.join(p))?.trim().to_owned(),
