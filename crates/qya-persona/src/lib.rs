@@ -32,6 +32,7 @@ pub enum PersonaError {
 
 #[derive(Debug, Clone)]
 pub struct Persona {
+    name: String,
     identity: Arc<str>,
     user_name: String,
     notes: Vec<Note>,
@@ -42,9 +43,15 @@ impl Persona {
     pub fn load(assets_dir: &Path) -> Result<Self, PersonaError> {
         let a = Assets::load(assets_dir)?;
         let identity: Arc<str> = render::identity(&a).into();
-        // 阿颜在国内，时间统一按东八区呈现
+        let name = a.card.name;
+        // 统一按东八区呈现时间
         let tz = TimeZone::get("Asia/Shanghai").unwrap_or(TimeZone::fixed(jiff::tz::offset(8)));
-        Ok(Self { identity, user_name: a.user_name, notes: a.notes, tz })
+        Ok(Self { name, identity, user_name: a.user_name, notes: a.notes, tz })
+    }
+
+    /// 角色名称（来自 `card.json` 的 `name`）。
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// S1 身份段。
@@ -72,7 +79,8 @@ impl Persona {
         &self.user_name
     }
 
-    pub fn notes_tool(&self) -> PersonaNotes {
-        PersonaNotes::new(self.notes.clone())
+    /// 按需资料查阅工具；当 `persona.toml` 未配置 `[[notes]]` 时返回 `None`。
+    pub fn notes_tool(&self) -> Option<PersonaNotes> {
+        (!self.notes.is_empty()).then(|| PersonaNotes::new(self.notes.clone()))
     }
 }

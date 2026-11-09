@@ -87,6 +87,24 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+## 自定义角色与称呼（面向开发者与部署 Agent）
+
+仓库默认自带作者自用的角色“唐语歌”与称呼“阿颜”作为完整生产示例。角色名与用户称呼已从代码中解耦，替换成你自己的角色**不需要修改 Rust 代码**，只需调整 `assets/persona/` 目录：
+
+1. **修改你的称呼**：编辑 `assets/persona/persona.toml` 中的 `user_name = "你的称呼"`。
+2. **替换角色卡**：用你的 SillyTavern 角色卡覆盖 `assets/persona/card.json`（支持标准 `chara_card_v2` 顶层结构或 `{"spec": "chara_card_v2", "data": {...}}` 包装结构）。角色名直接取自卡内的 `name` 字段；角色卡与所有 `.md` 文件中的 `{{char}}`、`{{user}}` 占位符会在渲染时自动替换。
+3. **处理常驻设定（`core`）与按需资料（`[[notes]]`，即原 Roleplay Skill / 世界书拆分）**：
+   > **给协助部署的 AI Agent 的说明**：仓库里的 `core/*.md`、`runtime/relationship.md` 和 `notes/*.md` 写的是“唐语歌”的专属设定。帮用户部署新角色时，**切勿原样保留这些文件**（否则新角色会串入唐语歌的设定），请先向用户确认属于以下哪种情况并按对应方式处理：
+   - **情况 A：用户只有一张 SillyTavern 角色卡（`card.json`），没有额外的长设定或 Skill**
+     在 `persona.toml` 中将 `core = []` 置空（或删掉该行），删掉 `runtime_relationship` 行，并删掉所有 `[[notes]]` 段；**保留 `runtime_agency = "runtime/agency.md"`**（该文件只定义通用的工具调用边界、后台派活规则与 `〔〕` 系统消息格式，已用 `{{user}}` 模板化，不含特定角色设定）。当 `[[notes]]` 为空时，运行时会自动不注册 `persona_notes` 工具。
+   - **情况 B：用户除了角色卡，还有一份 Roleplay Skill（`SKILL.md`）或长篇补充设定**
+     不要把几千上万字的设定全部塞进常驻提示词，请按“常驻 + 按需”两层拆分：
+     - **常驻层（`core/*.md`）**：只放每轮对话都必须遵守的核心性格驱动、说话口癖与边界（建议合计 ≤ 3,000 字），在 `persona.toml` 的 `core = [...]` 中按顺序列出，常驻 S1 缓存前缀。
+     - **按需层（`notes/*.md` + `[[notes]]`）**：把外貌穿搭、特定情境反应、人际关系细节、过往经历等“聊到相关话题才需要”的设定拆成若干 `.md` 放进 `notes/`，并在 `persona.toml` 中声明 `[[notes]]`（填好 `id`、`file` 与 `use` 查阅时机说明）。程序会根据 `[[notes]]` 动态生成 `persona_notes(topic)` 工具的参数枚举与说明，让模型在聊到对应话题时按需查阅。
+   - **情况 C：角色卡内含 SillyTavern 世界书（`character_book`）**
+     `constant = true` 且 `enabled = true` 的常驻条目会自动拼入 S1 `## 补充设定`；其余非常驻条目若内容较多，建议按主题整理成 `notes/*.md` 并配置到 `[[notes]]` 中按需读取。
+4. **检验与生效**：运行 `qya --config qya.toml --check` 核对渲染后的 S1 字数与启用的工具列表；运行中修改后在聊天里发 `/reload`，再发 `/new` 或 `/compact` 即可生效。详细字段映射与配置示例见 [`docs/04-persona-memory.md`](docs/04-persona-memory.md) 第 1.1 节。
+
 ## 聊天命令
 
 | 命令 | 作用 |

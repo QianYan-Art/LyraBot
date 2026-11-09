@@ -33,6 +33,71 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料（persona
 - 唐语歌不会主动开口：答应“到时候提醒你”这类有时间的事，当场用 cron 设好并告诉阿颜（具体某天的用一次性提醒），时间未定先问清楚。
 - 渲染卫生由 `crates/qya-persona/tests/persona.rs` 断言（首块为身份、段落顺序、无 Hermes/UI/占位符残留、重复渲染字节一致）。
 
+### 1.1 自定义角色卡、称呼与按需资料（开发者与部署 Agent 指南）
+
+代码不硬编码角色名与用户称呼：运行时统一从 `Persona::name()`（取自 `card.json` 的 `name`）和 `Persona::user_name()`（取自 `persona.toml` 的 `user_name`）读取，并在渲染 S1、按需资料（`notes`）、学习与记忆整理提示词时自动将 `{{char}}` 与 `{{user}}` 替换为对应名称。
+
+#### `card.json` 字段映射（SillyTavern `chara_card_v2`）
+
+支持直接放置字段，或包裹在 `{"spec": "chara_card_v2", "data": { ... }}` 内：
+
+| 字段 | 是否必填 | 在 S1 中的位置与处理 |
+|---|---|---|
+| `name` | **必填**（非空） | S1 标题 `# <name>`、身份声明 `你就是<name>本人`，以及替换所有 `{{char}}` |
+| `description` | 选填 | `## 核心描述` |
+| `personality` | 选填 | `## 性格` |
+| `system_prompt` | 选填 | `## 聊天准则`（自动过滤 `{{original}}`、`[Start a new chat]` 等酒馆 UI 指令行） |
+| `mes_example` | 选填 | `## 示例对话`（`<START>` 自动转为 `---` 分隔线，仅作语气参考） |
+| `character_book.entries` | 选填 | 仅提取 `constant == true && enabled == true` 的条目，按 `insertion_order` 排序后拼入 `## 补充设定` |
+| `first_mes` / `alternate_greetings` 等 | 忽略 | 聊天由用户主动发起，不使用固定开场白 |
+
+#### `persona.toml` 结构与三种配置方式
+
+| 字段 | 是否必填 | 说明 |
+|---|---|---|
+| `user_name` | **必填**（非空） | 对用户的称呼，替换所有 `{{user}}`，并用于记忆分区标题（`关于<user_name>`）与学习提示词 |
+| `card` | **必填** | 角色卡路径（相对 `assets/persona/`，通常为 `"card.json"`） |
+| `core` | 选填（默认 `[]`） | 常驻在 S1 `## 角色核心资料` 下的 Markdown 文件列表，适合放每轮必读的核心性格与说话方式 |
+| `runtime_relationship` | 选填 | 关系默认说明（如单用户恋人关系），插入在 `# <name>` 之后、`## 核心描述` 之前 |
+| `runtime_agency` | 选填（**建议保留**） | 默认指向 `"runtime/agency.md"`，定义真实操作以工具为准、轻重活分流（`delegate` / `cron`）与 `〔〕` 系统消息协议，内部已使用 `{{user}}` 占位符 |
+| `[[notes]]` | 选填（默认 `[]`） | 按需资料列表，每项含 `id`（枚举值）、`file`（Markdown 路径）、`use`（何时查阅的一句话说明）。为空时不注册 `persona_notes` 工具 |
+
+**方式一：仅使用 SillyTavern 角色卡（最简配置，无额外 Skill / 按需资料）**
+
+若用户只有一张 `card.json`，部署时请删去唐语歌专属的 `core`、`runtime_relationship` 与 `[[notes]]`，将 `persona.toml` 简化为：
+
+```toml
+user_name = "主人"
+card = "card.json"
+runtime_agency = "runtime/agency.md"
+```
+
+**方式二：将原有的 Roleplay Skill（`SKILL.md`）或长设定拆分为 `core` + `[[notes]]`**
+
+若用户除了角色卡，还有一份长篇人物设定、世界书非常驻条目或 Roleplay Skill：
+1. 将**每轮回复都必须遵守**的核心性格、口癖、叙事红线提炼为 1–3 个文件放入 `core/`，填入 `core = ["core/soul.md", ...]`。
+2. 将**特定话题才需要**的细节（如外貌穿搭、特定情境反应、相处细节、过往经历/世界观设定）按主题拆成 Markdown 文件放入 `notes/`，并在 `persona.toml` 中配置 `[[notes]]`：
+
+```toml
+user_name = "阿颜"
+card = "card.json"
+core = ["core/soul.md", "core/speech.md", "core/limits.md"]
+runtime_relationship = "runtime/relationship.md"
+runtime_agency = "runtime/agency.md"
+
+[[notes]]
+id = "appearance"
+file = "notes/appearance.md"
+use = "聊到长相、身材、穿搭、气味、审美偏好或自拍生图时"
+
+[[notes]]
+id = "life_events"
+file = "notes/life_events.md"
+use = "聊到过去的事、家庭、成长经历或世界观背景时"
+```
+
+运行时会自动根据 `[[notes]]` 构造 `persona_notes(topic)` 工具的 JSON Schema 枚举与描述，模型聊到相关话题时才会调用读取，日常闲聊或技术问答不占前缀 token。
+
 ## 2. Pacer（回复节奏）
 
 阶段机（`qya_persona::pacer` 纯逻辑 + 运行时计时）：

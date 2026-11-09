@@ -51,20 +51,22 @@ impl PersonaKit {
     fn load(c: &Config, sup: &Supervisor, memory_lock: &Arc<tokio::sync::Mutex<()>>) -> Result<Self> {
         let pc = &c.persona;
         let persona = Persona::load(&pc.assets_dir).context("装载人格资产")?;
+        let uname = persona.user_name();
         let memory = Memory::new(
             vec![
-                MemoryTarget { name: "user".into(), file: pc.memory_dir.join("user.md"), about: "关于阿颜的事实与偏好".into() },
+                MemoryTarget { name: "user".into(), file: pc.memory_dir.join("user.md"), about: format!("关于{uname}的事实与偏好") },
                 MemoryTarget { name: "memory".into(), file: pc.memory_dir.join("memory.md"), about: "你自己的备忘（你们之间的约定、共同的事）".into() },
             ],
-            "只在阿颜明确让你记住、或纠正你记错的事时写；日常聊到的事实与约定会在后台自动整理进记忆，不必每次都写。",
+            &format!("只在{uname}明确让你记住、或纠正你记错的事时写；日常聊到的事实与约定会在后台自动整理进记忆，不必每次都写。"),
         )
         .with_lock(memory_lock.clone());
-        let mut tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(persona.notes_tool()),
-            Arc::new(DelegateTool::new(sup.clone(), c)),
-            Arc::new(AgentCtlTool::new(sup.clone())),
-            Arc::new(memory),
-        ];
+        let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+        if let Some(notes) = persona.notes_tool() {
+            tools.push(Arc::new(notes));
+        }
+        tools.push(Arc::new(DelegateTool::new(sup.clone(), c)));
+        tools.push(Arc::new(AgentCtlTool::new(sup.clone())));
+        tools.push(Arc::new(memory));
         match qya_persona::Sticker::scan(&pc.stickers_dir) {
             Some(s) => tools.push(Arc::new(s)),
             None => tracing::info!(dir = %pc.stickers_dir.display(), "表情包目录不存在或为空，不启用 sticker"),
@@ -214,11 +216,12 @@ impl Runtime {
         }
         let mail = rt.store.pending_mail().await?;
         {
+            let uname = rt.kit().persona.user_name().to_owned();
             let mut st = rt.state();
             for m in &mail {
                 match WorkerReport::from_mail(m) {
                     Some(r) => {
-                        Self::queue_report(&mut st, r);
+                        Self::queue_report(&mut st, r, &uname);
                     }
                     None => tracing::warn!(mail = m.id, "无法解析的后台汇报，已跳过"),
                 }
@@ -261,11 +264,12 @@ impl Runtime {
 
     async fn new_persona_session(&self) -> Result<SessionId> {
         let c = self.cfg.get();
+        let name = self.kit().persona.name().to_owned();
         let id = self
             .store
             .create_session(NewSession {
                 kind: Some(SessionKind::Persona),
-                name: Some("唐语歌".into()),
+                name: Some(name),
                 model: c.persona.model.clone(),
                 effort: c.persona.effort.to_string(),
                 ..Default::default()
@@ -393,10 +397,11 @@ impl Runtime {
         }
         tokio::spawn(async move {
             while let Some(r) = rx.recv().await {
+                let uname = self.kit().persona.user_name().to_owned();
                 let start = {
                     let mut st = self.state();
                     let relay = r.notify == Notify::Relay;
-                    Self::queue_report(&mut st, r) && relay && matches!(st.phase, Phase::Idle | Phase::Debouncing)
+                    Self::queue_report(&mut st, r, &uname) && relay && matches!(st.phase, Phase::Idle | Phase::Debouncing)
                 };
                 if start {
                     self.clone().arm_timer();
@@ -406,12 +411,12 @@ impl Runtime {
     }
 
     /// 汇报入队（按信件 id 去重），返回是否新加入。
-    fn queue_report(st: &mut State, r: WorkerReport) -> bool {
+    fn queue_report(st: &mut State, r: WorkerReport, user_name: &str) -> bool {
         if r.mail != 0 && st.mail.iter().chain(&st.inflight).any(|m| m.id == r.mail) {
             return false;
         }
         st.relay_media.extend(r.media.iter().cloned());
-        st.mail.push(Relay { id: r.mail, msg: Message::user(relay_text(&r)), notify: r.notify });
+        st.mail.push(Relay { id: r.mail, msg: Message::user(relay_text(&r, user_name)), notify: r.notify });
         true
     }
 
@@ -474,15 +479,18 @@ impl Runtime {
         let fmt = |ms: i64| {
             jiff::Timestamp::from_millisecond(ms).map(|t| t.to_zoned(tz.clone()).strftime("%m-%d %H:%M").to_string()).unwrap_or_default()
         };
+        let pname = self.kit().persona.name().to_owned();
         let mut c = Card::new("📂", "会话与数据库");
-        c.section("唐语歌最近的会话");
+        c.section(format!("{pname}最近的会话"));
         for x in &list {
             let state = if x.id == cur { "当前" } else if x.status == "closed" { "已结束" } else { "历史" };
             c.item(format!("#{} {state}｜{} 条｜{}", x.id, x.messages, fmt(x.updated_at)));
         }
+        let active_lbl = format!("{pname}进行中");
+        let closed_lbl = format!("{pname}已结束");
         let label = |k: &str, st: &str| match (k, st) {
-            ("persona", "active") => "唐语歌进行中",
-            ("persona", "closed") => "唐语歌已结束",
+            ("persona", "active") => active_lbl.as_str(),
+            ("persona", "closed") => closed_lbl.as_str(),
             ("worker", "active") => "后台任务进行中",
             ("worker", "archived") => "后台任务已归档",
             ("specialist", _) => "常驻专员",
@@ -509,8 +517,9 @@ impl Runtime {
     }
 
     async fn switch_session(&self, target: SessionId) -> Result<String> {
+        let pname = self.kit().persona.name().to_owned();
         let Some(_idle) = self.lock_idle() else {
-            return Ok(card::warn("唐语歌正在回复中，请等这轮结束或先发 /stop"));
+            return Ok(card::warn(format!("{pname}正在回复中，请等这轮结束或先发 /stop")));
         };
         let old = self.session();
         if target == old {
@@ -523,7 +532,7 @@ impl Runtime {
             Err(qya_store::StoreError::NotFound(_)) => {
                 return Ok(card::warn(format!("没有会话 #{target}，发 /sessions 查看可切换的编号")));
             }
-            Err(qya_store::StoreError::Invalid(msg)) => return Ok(card::warn(msg)),
+            Err(qya_store::StoreError::Invalid(_)) => return Ok(card::warn(format!("#{target} 不是{pname}的会话，无法切换"))),
             Err(e) => return Err(e.into()),
         };
         if model_info(&c, &row.model).is_err() {
@@ -609,6 +618,7 @@ impl Runtime {
     }
 
     async fn fire_cron(self: Arc<Self>, job: qya_store::CronJob) {
+        let uname = self.kit().persona.user_name().to_owned();
         let action = &job.action;
         match action["kind"].as_str() {
             Some("task") => {
@@ -618,20 +628,20 @@ impl Runtime {
                     parent_call_id: format!("cron-{}", job.id),
                     task: action["task"].as_str().unwrap_or_default().to_owned(),
                     context: ContextMode::Brief,
-                    context_note: Some(format!("这是定时任务 #{}「{}」自动触发的，阿颜此刻不一定在线。", job.id, job.name)),
+                    context_note: Some(format!("这是定时任务 #{}「{}」自动触发的，{uname}此刻不一定在线。", job.id, job.name)),
                     target: if to == "worker" { Target::Worker } else { Target::Specialist(to.to_owned()) },
                     model: None,
                     effort: None,
                     notify: Notify::Relay,
                 };
                 if let Err(e) = self.sup.delegate(req).await {
-                    let msg = format!("〔定时任务 #{}「{}」派发失败：{e}〕\n〔请告诉阿颜这次没能执行〕", job.id, job.name);
+                    let msg = format!("〔定时任务 #{}「{}」派发失败：{e}〕\n〔请告诉{uname}这次没能执行〕", job.id, job.name);
                     self.on_chat(Message::user(msg), false);
                 }
             }
             _ => {
                 let msg = format!(
-                    "〔定时提醒 #{}「{}」到点了〕\n{}\n〔这是阿颜之前让你设的提醒，不是他刚说的话。用你自己的话提醒他。〕",
+                    "〔定时提醒 #{}「{}」到点了〕\n{}\n〔这是{uname}之前让你设的提醒，不是他刚说的话。用你自己的话提醒他。〕",
                     job.id,
                     job.name,
                     action["text"].as_str().unwrap_or_default()
@@ -836,7 +846,7 @@ impl Runtime {
     fn tail(&self, persona: &Persona, c: &Config, query: &str) -> String {
         let mut t = persona.tail(jiff::Timestamp::now());
         let index = self.index.lock().expect("index 锁中毒").clone();
-        if let Some(h) = index.hints(query, 3, c.persona.learner.inject_max_chars) {
+        if let Some(h) = index.hints(query, persona.user_name(), 3, c.persona.learner.inject_max_chars) {
             t.push('\n');
             t.push_str(&h);
         }
@@ -911,7 +921,7 @@ impl Runtime {
                     return Ok(card::warn(format!("模型 {m} 不在模型目录中，发 /model 查看可选模型")));
                 }
                 self.store.update_session(self.session(), Some(m.clone()), None, None).await?;
-                card::ok(format!("唐语歌的模型已切换为 {m}"))
+                card::ok(format!("{}的模型已切换为 {m}", self.kit().persona.name()))
             }
             Command::Effort(None) => {
                 let s = self.store.session(self.session()).await?;
@@ -1012,11 +1022,11 @@ impl Runtime {
     /// `--check`：配置、数据库、人格资产、模型连通性自检（不连接聊天平台）。
     pub async fn check(&self) -> Result<()> {
         let c = self.cfg.get();
+        let kit = self.kit();
         println!("版本：qya {}", crate::VERSION);
         println!("配置：{}", self.cfg.path().display());
         println!("数据：{}", c.data_dir.display());
-        println!("唐语歌会话：#{}", self.session());
-        let kit = self.kit();
+        println!("{}会话：#{}", kit.persona.name(), self.session());
         let names: Vec<_> = kit.tools.iter().map(|t| t.spec().name.clone()).collect();
         println!(
             "人格 S1：{} 字符；记忆目录 {}；人格工具 {}",
@@ -1055,7 +1065,7 @@ impl Runtime {
             return Ok(card::warn(format!("没有后台任务 #{id}，发 /agents 查看列表")));
         };
         if row.kind == SessionKind::Persona {
-            return Ok(card::warn(format!("#{id} 是唐语歌的会话，不是后台任务")));
+            return Ok(card::warn(format!("#{id} 是{}的会话，不是后台任务", self.kit().persona.name())));
         }
         let info = self.sup.list().await.into_iter().find(|w| w.id == id);
         let status = info.as_ref().map(|w| w.status.label()).unwrap_or("已归档");
@@ -1115,19 +1125,19 @@ fn model_info<'a>(c: &'a Config, model: &str) -> Result<&'a ModelInfo> {
         .with_context(|| format!("模型 {model} 不在模型目录中"))
 }
 
-/// 后台结果交给唐语歌时的消息文本（以〔〕标明是系统信息，见 assets/persona/runtime/agency.md）。
-fn relay_text(r: &WorkerReport) -> String {
+/// 后台结果交给主对话时的消息文本（以〔〕标明是系统信息，见 assets/persona/runtime/agency.md）。
+fn relay_text(r: &WorkerReport, user_name: &str) -> String {
     let who = match &r.kind {
         WorkerKind::Worker => format!("后台 #{}「{}」", r.id, r.title),
         WorkerKind::Specialist(n) => format!("专员 {n}（#{}）", r.id),
     };
     let mut s = format!("〔后台结果：{who}{}，用时 {} 秒〕\n{}", r.status.label(), r.elapsed_s, r.summary);
     if let Some(q) = &r.question {
-        s.push_str(&format!("\n〔需要阿颜决定〕{q}"));
+        s.push_str(&format!("\n〔需要{user_name}决定〕{q}"));
     }
-    s.push_str("\n〔这是后台交回的结果，不是阿颜的新消息。用你自己的话把要点告诉阿颜；没做成就如实说。");
+    s.push_str(&format!("\n〔这是后台交回的结果，不是{user_name}的新消息。用你自己的话把要点告诉{user_name}；没做成就如实说。"));
     if r.question.is_some() {
-        s.push_str("需要阿颜决定的问题要单独、简短地问出来，等阿颜回答后再用 agent_ctl continue 交给它。");
+        s.push_str(&format!("需要{user_name}决定的问题要单独、简短地问出来，等{user_name}回答后再用 agent_ctl continue 交给它。"));
     }
     s.push('〕');
     s

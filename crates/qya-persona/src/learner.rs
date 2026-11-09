@@ -12,14 +12,14 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
 use tokio_util::sync::CancellationToken;
 
-const LEARN_PROMPT: &str = "你在帮唐语歌整理她和阿颜的私聊，让她以后更懂阿颜。只输出一个 JSON 对象，不要解释：\
+const LEARN_PROMPT: &str = "你在帮{{char}}整理她和{{user}}的私聊，让她以后更懂{{user}}。只输出一个 JSON 对象，不要解释：\
 {\"expressions\": [...], \"memories\": [...]}。\n\
-expressions：阿颜的专属说法，只从【阿颜】的话里提取，每项字段 kind（\"jargon\" 或 \"habit\"）、text（原文，≤20 字）、\
+expressions：{{user}}的专属说法，只从【{{user}}】的话里提取，每项字段 kind（\"jargon\" 或 \"habit\"）、text（原文，≤20 字）、\
 meaning（含义或该怎么理解回应，≤40 字）、situation（通常在什么情境下说，≤30 字）、triggers（1~3 个会原样出现在消息里的关键词）。\
-jargon 是网络梗、缩写、谐音、自造词、你们之间的专属叫法与玩笑；habit 是阿颜稳定的表达习惯（口头禅、称呼偏好、用某个词表达某种情绪）。最多 8 条。\n\
-memories：值得长期记住的事，每项字段 target（\"user\" 关于阿颜本人，\"memory\" 你们之间的约定与共同的事）、\
-text（一句话，≤60 字，写清主语与关键细节）、basis（\"stated\" 阿颜亲口陈述，\"agreed\" 阿颜明确认可的约定，\"corrected\" 阿颜纠正过的地方）。\
-只记阿颜说过或明确认可的：唐语歌的话只用来理解上下文，她对自己的描述与剧情发挥一律不记。最多 6 条。\n\
+jargon 是网络梗、缩写、谐音、自造词、你们之间的专属叫法与玩笑；habit 是{{user}}稳定的表达习惯（口头禅、称呼偏好、用某个词表达某种情绪）。最多 8 条。\n\
+memories：值得长期记住的事，每项字段 target（\"user\" 关于{{user}}本人，\"memory\" 你们之间的约定与共同的事）、\
+text（一句话，≤60 字，写清主语与关键细节）、basis（\"stated\" {{user}}亲口陈述，\"agreed\" {{user}}明确认可的约定，\"corrected\" {{user}}纠正过的地方）。\
+只记{{user}}说过或明确认可的：{{char}}的话只用来理解上下文，她对自己的描述与剧情发挥一律不记。最多 6 条。\n\
 两类都不要提取：普通词汇、一次性的任务细节与过程、已解决的问题、带具体时间的提醒（那由定时任务负责）、\
 隐私凭据（地址、电话、账号、密码、密钥）。宁缺毋滥，没有值得记的就给空数组。";
 
@@ -171,12 +171,14 @@ pub async fn learn(
     provider: &dyn Provider,
     model: &str,
     effort: Effort,
+    persona: &crate::Persona,
     transcript: &str,
     cancel: CancellationToken,
 ) -> Result<Learned, qya_llm::LlmError> {
+    let sys = LEARN_PROMPT.replace("{{user}}", persona.user_name()).replace("{{char}}", persona.name());
     let req = ChatRequest {
         model: model.to_owned(),
-        system: vec![LEARN_PROMPT.to_owned()],
+        system: vec![sys],
         messages: vec![Message::user(transcript.to_owned())],
         tools: Vec::new(),
         effort: Some(effort),
@@ -220,7 +222,7 @@ impl Index {
     }
 
     /// 为本轮输入挑选至多 `max_items` 条提示，渲染后不超过 `max_chars` 字。
-    pub fn hints(&self, query: &str, max_items: usize, max_chars: usize) -> Option<String> {
+    pub fn hints(&self, query: &str, user_name: &str, max_items: usize, max_chars: usize) -> Option<String> {
         if self.items.is_empty() || query.trim().is_empty() {
             return None;
         }
@@ -252,8 +254,8 @@ impl Index {
         for (_, i) in scored.into_iter().take(max_items) {
             let e = &self.items[i];
             let p = match (e.kind.as_str(), &e.meaning) {
-                ("habit", Some(m)) => format!("阿颜习惯说“{}”（{m}）", e.text),
-                ("habit", None) => format!("阿颜习惯说“{}”", e.text),
+                ("habit", Some(m)) => format!("{user_name}习惯说“{}”（{m}）", e.text),
+                ("habit", None) => format!("{user_name}习惯说“{}”", e.text),
                 (_, Some(m)) => format!("「{}」={m}", e.text),
                 (_, None) => format!("「{}」", e.text),
             };
@@ -358,13 +360,13 @@ mod tests {
             expr(2, "habit", "绷不住", "觉得好笑", &["绷不住"]),
             expr(3, "jargon", "毫无关系", "无关", &["火星文"]),
         ]);
-        let h = idx.hints("今天的面试彻底寄了", 3, 200).unwrap();
+        let h = idx.hints("今天的面试彻底寄了", "阿颜", 3, 200).unwrap();
         assert!(h.contains("「寄了」=失败、搞砸"), "{h}");
         assert!(!h.contains("火星文") && !h.contains("毫无关系"));
-        assert!(idx.hints("天气不错", 3, 200).is_none());
+        assert!(idx.hints("天气不错", "阿颜", 3, 200).is_none());
         // 单字信号对语序不敏感：情境“说事情搞砸了”与“事情又搞砸”能匹配上
-        assert!(idx.hints("这件事情又搞砸了", 3, 200).is_some());
-        assert!(idx.hints("寄了 绷不住", 3, 5).is_none(), "超出字数预算时不注入");
-        assert!(Index::default().hints("寄了", 3, 200).is_none());
+        assert!(idx.hints("这件事情又搞砸了", "阿颜", 3, 200).is_some());
+        assert!(idx.hints("寄了 绷不住", "阿颜", 3, 5).is_none(), "超出字数预算时不注入");
+        assert!(Index::default().hints("寄了", "阿颜", 3, 200).is_none());
     }
 }

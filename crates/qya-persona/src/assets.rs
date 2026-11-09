@@ -8,9 +8,12 @@ use std::path::{Path, PathBuf};
 #[serde(deny_unknown_fields)]
 struct Manifest {
     user_name: String,
+    #[serde(default)]
     core: Vec<CoreRef>,
-    runtime_relationship: PathBuf,
-    runtime_agency: PathBuf,
+    #[serde(default)]
+    runtime_relationship: Option<PathBuf>,
+    #[serde(default)]
+    runtime_agency: Option<PathBuf>,
     #[serde(default)]
     notes: Vec<NoteRef>,
 }
@@ -110,12 +113,23 @@ impl Assets {
             if notes.iter().any(|x: &Note| x.id == n.id) {
                 return Err(PersonaError::Invalid(format!("notes 条目 id 重复：{}", n.id)));
             }
-            notes.push(Note { id: n.id.clone(), usage: n.usage.clone(), body: body_of(&read(&dir.join(&n.file))?) });
+            let body = body_of(&read(&dir.join(&n.file))?)
+                .replace("{{user}}", &manifest.user_name)
+                .replace("{{char}}", &card.name);
+            notes.push(Note { id: n.id.clone(), usage: n.usage.clone(), body });
         }
+        let relationship = match &manifest.runtime_relationship {
+            Some(p) => read(&dir.join(p))?.trim().to_owned(),
+            None => String::new(),
+        };
+        let agency = match &manifest.runtime_agency {
+            Some(p) => read(&dir.join(p))?.trim().to_owned(),
+            None => String::new(),
+        };
         Ok(Self {
             user_name: manifest.user_name,
-            relationship: read(&dir.join(&manifest.runtime_relationship))?.trim().to_owned(),
-            agency: read(&dir.join(&manifest.runtime_agency))?.trim().to_owned(),
+            relationship,
+            agency,
             card,
             core,
             notes,

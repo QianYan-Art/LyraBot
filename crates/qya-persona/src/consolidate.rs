@@ -20,8 +20,13 @@ const MAX_REMOVALS: usize = 3;
 /// 单条记忆上限（字）。
 const ENTRY_CHARS: usize = 80;
 
-/// 两份记忆文件：user（关于阿颜）与 memory（你们之间的约定与共同的事）。
-pub const TARGETS: [(&str, &str, char); 2] = [("user", "关于阿颜", 'u'), ("memory", "约定与共同的事", 'm')];
+/// 两份记忆文件：user（关于用户）与 memory（你们之间的约定与共同的事）。
+pub const TARGETS: [(&str, char); 2] = [("user", 'u'), ("memory", 'm')];
+
+/// 按当前用户名生成记忆分类标题。
+pub fn target_label(target: &str, user_name: &str) -> String {
+    if target == "user" { format!("关于{user_name}") } else { "约定与共同的事".to_owned() }
+}
 
 pub fn entries(text: &str) -> Vec<String> {
     text.split(SEP).map(str::trim).filter(|e| !e.is_empty()).map(str::to_owned).collect()
@@ -70,19 +75,20 @@ pub fn prefilter(files: &BTreeMap<String, Vec<String>>, cands: Vec<Candidate>) -
     (keep, dropped)
 }
 
-const PROMPT: &str = "你负责整理唐语歌的长期记忆。输入是两份现有记忆（u 开头是关于阿颜的条目，m 开头是你们之间的约定与共同的事）和一批新候选。\
+const PROMPT: &str = "你负责整理{{char}}的长期记忆。输入是两份现有记忆（u 开头是关于{{user}}的条目，m 开头是你们之间的约定与共同的事）和一批新候选。\
 逐条判断每个候选：\n\
 - 已有条目表达的是同一件事、没有新信息：不输出任何操作；\n\
 - 与已有条目是同一件事但有补充或更新：update 该条，text 写合并后的完整一句；\n\
-- 与已有条目矛盾：以候选（阿颜最新的说法）为准，update 旧条，确实作废时 remove；\n\
+- 与已有条目矛盾：以候选（{{user}}最新的说法）为准，update 旧条，确实作废时 remove；\n\
 - 新的事：add 到 target 对应的文件。\n\
 每条一句话、不超过 60 字，写清主语和关键细节；不要编造候选里没有的内容；不要改动与候选无关的条目。\
 只输出 JSON 数组，不要解释：[{\"op\":\"add\",\"target\":\"user\",\"text\":\"…\"},{\"op\":\"update\",\"id\":\"u2\",\"text\":\"…\"},{\"op\":\"remove\",\"id\":\"m1\"}]；没有需要的改动就输出 []。";
 
 /// 给模型的输入：带编号的现有条目与候选。
-pub fn prompt_input(files: &BTreeMap<String, Vec<String>>, cands: &[Candidate]) -> String {
+pub fn prompt_input(files: &BTreeMap<String, Vec<String>>, cands: &[Candidate], user_name: &str) -> String {
     let mut s = String::new();
-    for (name, label, prefix) in TARGETS {
+    for (name, prefix) in TARGETS {
+        let label = target_label(name, user_name);
         s.push_str(&format!("【现有记忆：{label}（{name}）】\n"));
         let list = files.get(name).map(Vec::as_slice).unwrap_or_default();
         if list.is_empty() {
@@ -121,7 +127,7 @@ fn locate(id: &str) -> Option<(&'static str, usize)> {
     let mut cs = id.trim().chars();
     let prefix = cs.next()?;
     let n: usize = cs.as_str().parse().ok()?;
-    let name = TARGETS.iter().find(|(_, _, p)| *p == prefix)?.0;
+    let name = TARGETS.iter().find(|(_, p)| *p == prefix)?.0;
     n.checked_sub(1).map(|i| (name, i))
 }
 
@@ -130,9 +136,9 @@ fn clip(s: &str) -> String {
 }
 
 /// 第二阶段的确定性应用：先按原编号处理改与删，再追加新增；守住删除条数与每个文件的字数上限。
-pub fn apply(files: &BTreeMap<String, Vec<String>>, ops: Vec<Op>) -> (BTreeMap<String, Vec<String>>, Vec<String>) {
+pub fn apply(files: &BTreeMap<String, Vec<String>>, ops: Vec<Op>, user_name: &str) -> (BTreeMap<String, Vec<String>>, Vec<String>) {
     let mut out = files.clone();
-    for (name, _, _) in TARGETS {
+    for (name, _) in TARGETS {
         out.entry(name.to_owned()).or_default();
     }
     let mut changes = Vec::new();
@@ -159,7 +165,7 @@ pub fn apply(files: &BTreeMap<String, Vec<String>>, ops: Vec<Op>) -> (BTreeMap<S
             }
             Op::Add { target, text } => {
                 let text = clip(&text);
-                if TARGETS.iter().any(|(n, _, _)| *n == target) && !text.is_empty() {
+                if TARGETS.iter().any(|(n, _)| *n == target) && !text.is_empty() {
                     adds.push((target, text));
                 }
             }
@@ -170,7 +176,7 @@ pub fn apply(files: &BTreeMap<String, Vec<String>>, ops: Vec<Op>) -> (BTreeMap<S
     for (name, i) in removed {
         let list = out.get_mut(name).expect("目标已初始化");
         let old = list.remove(i);
-        let prefix = TARGETS.iter().find(|(n, _, _)| *n == name).map_or('?', |t| t.2);
+        let prefix = TARGETS.iter().find(|(n, _)| *n == name).map_or('?', |t| t.1);
         changes.push(format!("删除 {prefix}{}：{old}", i + 1));
     }
     for (target, text) in adds {
@@ -183,12 +189,13 @@ pub fn apply(files: &BTreeMap<String, Vec<String>>, ops: Vec<Op>) -> (BTreeMap<S
             changes.push(format!("未新增（{target} 已接近 {MEMORY_FILE_LIMIT} 字上限）：{text}"));
             continue;
         }
-        let label = TARGETS.iter().find(|(n, _, _)| *n == target).map_or("", |t| t.1);
+        let label = target_label(&target, user_name);
         changes.push(format!("新增（{label}）：{text}"));
         list.push(text);
     }
     // 修改使文件超限时，该文件整体保持原样，并撤掉它的变更说明
-    for (name, label, prefix) in TARGETS {
+    for (name, prefix) in TARGETS {
+        let label = target_label(name, user_name);
         let total: usize = out[name].iter().map(|e| e.chars().count()).sum();
         if total > MEMORY_FILE_LIMIT {
             out.insert(name.to_owned(), files.get(name).cloned().unwrap_or_default());
@@ -205,6 +212,7 @@ pub async fn consolidate(
     provider: &dyn Provider,
     model: &str,
     effort: Effort,
+    persona: &crate::Persona,
     files: &BTreeMap<String, Vec<String>>,
     cands: Vec<Candidate>,
     cancel: CancellationToken,
@@ -213,10 +221,13 @@ pub async fn consolidate(
     if keep.is_empty() {
         return Ok(Outcome { files: files.clone(), changes: Vec::new(), processed });
     }
+    let user_name = persona.user_name();
+    let char_name = persona.name();
+    let sys = PROMPT.replace("{{user}}", user_name).replace("{{char}}", char_name);
     let req = ChatRequest {
         model: model.to_owned(),
-        system: vec![PROMPT.to_owned()],
-        messages: vec![Message::user(prompt_input(files, &keep))],
+        system: vec![sys],
+        messages: vec![Message::user(prompt_input(files, &keep, user_name))],
         tools: Vec::new(),
         effort: Some(effort),
         max_tokens: Some(4000),
@@ -226,7 +237,7 @@ pub async fn consolidate(
         tracing::warn!("记忆整理输出不是合法 JSON，候选保留到下次");
         return Ok(Outcome { files: files.clone(), changes: Vec::new(), processed });
     };
-    let (files, changes) = apply(files, ops);
+    let (files, changes) = apply(files, ops, user_name);
     processed.extend(keep.iter().map(|c| c.id));
     Ok(Outcome { files, changes, processed })
 }
@@ -267,7 +278,7 @@ mod tests {
                 {"op":"update","id":"u9","text":"越界"},{"op":"remove","id":"x1"}]"#,
         )
         .unwrap();
-        let (out, changes) = apply(&f, ops);
+        let (out, changes) = apply(&f, ops, "阿颜");
         assert_eq!(out["user"], vec!["阿颜改喝无糖奶茶", "阿颜搬到了杭州"]);
         assert_eq!(out["memory"], vec!["约好周日复盘"], "无关文件不变");
         assert_eq!(changes, vec!["修改 u1：阿颜喜欢少糖奶茶 → 阿颜改喝无糖奶茶", "删除 u2：阿颜在上海", "新增（关于阿颜）：阿颜搬到了杭州"]);
@@ -277,10 +288,10 @@ mod tests {
     fn removals_are_capped_and_limit_is_kept() {
         let f = files(&["一一一一", "二二二二", "三三三三", "四四四四", "五五五五"], &[]);
         let ops = (1..=5).map(|i| Op::Remove { id: format!("u{i}") }).collect();
-        let (out, _) = apply(&f, ops);
+        let (out, _) = apply(&f, ops, "阿颜");
         assert_eq!(out["user"].len(), 2, "单次最多删除 3 条");
         let full = files(&[&"满".repeat(MEMORY_FILE_LIMIT - 2)], &[]);
-        let (out, changes) = apply(&full, vec![Op::Add { target: "user".into(), text: "再加一条新内容".into() }]);
+        let (out, changes) = apply(&full, vec![Op::Add { target: "user".into(), text: "再加一条新内容".into() }], "阿颜");
         assert_eq!(out["user"].len(), 1);
         assert!(changes[0].starts_with("未新增"));
         // 修改让 user 超限：user 回滚且其修改说明撤掉，memory 的新增照常保留
@@ -291,6 +302,7 @@ mod tests {
                 Op::Update { id: "u2".into(), text: "改".repeat(70) },
                 Op::Add { target: "memory".into(), text: "约好周日复盘".into() },
             ],
+            "阿颜",
         );
         assert_eq!(out["user"], near["user"]);
         assert_eq!(out["memory"], vec!["约好周日复盘"]);

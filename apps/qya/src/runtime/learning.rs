@@ -36,7 +36,7 @@ impl Runtime {
     fn read_memory(&self) -> BTreeMap<String, Vec<String>> {
         TARGETS
             .iter()
-            .map(|(name, _, _)| (name.to_string(), consolidate::entries(&std::fs::read_to_string(self.memory_path(name)).unwrap_or_default())))
+            .map(|(name, _)| (name.to_string(), consolidate::entries(&std::fs::read_to_string(self.memory_path(name)).unwrap_or_default())))
             .collect()
     }
 
@@ -140,10 +140,10 @@ impl Runtime {
         let last = entries.last().map(|e| e.id).unwrap_or(ckpt);
         let msgs: Vec<Message> = entries.into_iter().filter_map(|e| serde_json::from_value(e.payload).ok()).collect();
         let kit = self.kit();
-        let text = learner::transcript(&msgs, kit.persona.user_name(), "唐语歌");
+        let text = learner::transcript(&msgs, kit.persona.user_name(), kit.persona.name());
         let pcfg = c.provider(&c.persona.provider).context("persona provider 未配置")?;
         let provider = qya_llm::build(pcfg)?;
-        let learned = learner::learn(provider.as_ref(), &lc.model, lc.effort, &text, CancellationToken::new()).await?;
+        let learned = learner::learn(provider.as_ref(), &lc.model, lc.effort, &kit.persona, &text, CancellationToken::new()).await?;
         let n = learned.expressions.len();
         let (added, reinforced, removed) = self.store.learn_expressions(learned.expressions, lc.max_items).await?;
         let notes = learned.memories.into_iter().map(|m| (m.target, m.text, m.basis)).collect();
@@ -178,7 +178,8 @@ impl Runtime {
         let provider = qya_llm::build(pcfg)?;
         let n = cands.len();
         let cands = cands.into_iter().map(|c| Candidate { id: c.id, target: c.target, text: c.text, basis: c.basis }).collect();
-        let out = consolidate::consolidate(provider.as_ref(), &lc.model, lc.effort, &before, cands, CancellationToken::new()).await?;
+        let kit = self.kit();
+        let out = consolidate::consolidate(provider.as_ref(), &lc.model, lc.effort, &kit.persona, &before, cands, CancellationToken::new()).await?;
         if out.files == before {
             self.store.drop_memory_candidates(out.processed).await?;
             return Ok(Some(format!("整理了 {n} 条记忆候选，没有需要改动的")));
@@ -235,9 +236,10 @@ impl Runtime {
             }
             LearnCmd::List(LearnScope::Memory) => {
                 let files = self.read_memory();
+                let uname = self.kit().persona.user_name().to_owned();
                 let mut c = Card::new("📝", "长期记忆");
-                for (name, label, prefix) in TARGETS {
-                    c.section(label);
+                for (name, prefix) in TARGETS {
+                    c.section(consolidate::target_label(name, &uname));
                     let list = &files[name];
                     if list.is_empty() {
                         c.line("（空）");
@@ -288,7 +290,9 @@ impl Runtime {
         let pending = self.store.memory_candidates().await?.len();
         let mut c = Card::new("🌱", "学习与记忆");
         c.line(format!("自动学习：{on}")).section("现有").item(format!("说法 {exprs} 条"));
-        for (name, label, _) in TARGETS {
+        let uname = self.kit().persona.user_name().to_owned();
+        for (name, _) in TARGETS {
+            let label = consolidate::target_label(name, &uname);
             c.item(format!("{label} {} 条（{}/{} 字）", files[name].len(), size(name), qya_persona::MEMORY_FILE_LIMIT));
         }
         c.item(format!("待整理的记忆候选 {pending} 条"));
@@ -321,11 +325,12 @@ impl Runtime {
             });
         }
         let (prefix, idx) = id.split_at(1);
-        let Some((name, label, _)) = TARGETS.iter().find(|(_, _, p)| p.to_string() == prefix) else { return Ok(card::warn(format!("没有 {id}"))) };
+        let Some((name, _)) = TARGETS.iter().find(|(_, p)| p.to_string() == prefix) else { return Ok(card::warn(format!("没有 {id}"))) };
         let Some(i) = idx.parse::<usize>().ok().and_then(|n| n.checked_sub(1)) else { return Ok(card::warn(format!("没有 {id}"))) };
         let _g = self.memory_lock.lock().await;
         let mut list = self.read_memory().remove(*name).unwrap_or_default();
         if i >= list.len() {
+            let label = consolidate::target_label(name, self.kit().persona.user_name());
             return Ok(card::warn(format!("「{label}」里没有 {id}，发 /learn list 记忆 查看编号")));
         }
         let old = list.remove(i);
