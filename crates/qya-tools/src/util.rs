@@ -59,7 +59,9 @@ impl Audit {
                 tokio::fs::create_dir_all(dir).await?;
             }
             let mut f = tokio::fs::OpenOptions::new().create(true).append(true).open(&self.path).await?;
-            f.write_all(line.as_bytes()).await
+            f.write_all(line.as_bytes()).await?;
+            // tokio 的文件写在后台线程完成，不 flush 就返回时这一行可能还没落盘
+            f.flush().await
         }
         .await;
         if let Err(e) = res {
