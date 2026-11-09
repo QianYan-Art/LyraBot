@@ -52,7 +52,7 @@ impl GrokSearch {
     pub fn new(host: Host) -> Self {
         let spec = ToolSpec {
             name: "grok_search".into(),
-            description: "用 grok 联网检索，适合需要多来源交叉、社交平台（如 X）或 web_search 结果不够时；阿颜明确说用 grok 搜时也用它。platform 可指定专注的平台。".into(),
+            description: "用 grok 联网检索，适合需要多来源交叉、社交平台（如 X）或 web_search 结果不够时；明确要求用 grok 搜时也用它。platform 可指定专注的平台。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {"query": {"type": "string"}, "platform": {"type": "string"}},

@@ -116,7 +116,7 @@ impl Tool for Shell {
         let Some(command) = arg_str(&args, "command") else { return ToolOutput::err("缺少 command") };
         if let Some(why) = denied(command) {
             self.audit.record(json!({"ts": now_ms(), "session": ctx.session, "tool": "shell", "command": command, "denied": why})).await;
-            return ToolOutput::err(format!("拒绝执行：{why}。这类操作需要阿颜亲自在服务器上处理。"));
+            return ToolOutput::err(format!("拒绝执行：{why}。这类操作需要用户在服务器上亲自处理。"));
         }
         let timeout = arg_u64(&args, "timeout_s").unwrap_or(self.cfg.timeout_s).clamp(1, self.cfg.max_timeout_s);
         let workdir: Option<PathBuf> = arg_str(&args, "workdir").map(PathBuf::from).or_else(|| self.cfg.workdir.clone());

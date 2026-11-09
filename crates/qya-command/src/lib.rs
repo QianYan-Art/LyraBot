@@ -93,7 +93,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "stop",
         usage: "/stop",
         summary: "停止当前回复",
-        detail: "停止唐语歌正在进行的这一轮。",
+        detail: "停止正在进行的这一轮回复。",
     },
     CommandSpec {
         group: "对话与状态",
@@ -107,14 +107,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "new",
         usage: "/new",
         summary: "开新会话",
-        detail: "唐语歌开启新会话：记忆和关系不变，只是技术上的会话重开；旧会话标为已结束。",
+        detail: "开启新会话：记忆和关系不变，只是技术上的会话重开；旧会话标为已结束。",
     },
     CommandSpec {
         group: "会话与记忆",
         name: "sessions",
         usage: "/sessions [编号]",
         summary: "查看或切换会话",
-        detail: "不带参数查看唐语歌最近的会话与数据库情况；带编号切回某个历史会话。\n/sessions 查看最近会话与编号\n/sessions 5 切回唐语歌的历史会话 #5（沿用当时的记忆快照，需要最新记忆时发 /compact）",
+        detail: "不带参数查看最近的会话与数据库情况；带编号切回某个历史会话。\n/sessions 查看最近会话与编号\n/sessions 5 切回历史会话 #5（沿用当时的记忆快照，需要最新记忆时发 /compact）",
     },
     CommandSpec {
         group: "会话与记忆",
@@ -135,7 +135,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "model",
         usage: "/model [名称]",
         summary: "查看或切换模型",
-        detail: "不带参数查看当前模型与可选模型；带名称切换唐语歌的模型。",
+        detail: "不带参数查看当前模型与可选模型；带名称切换主对话模型。",
     },
     CommandSpec {
         group: "模型与扩展",

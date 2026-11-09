@@ -30,7 +30,7 @@ impl WatchVideo {
     pub fn new(host: Host) -> Self {
         let spec = ToolSpec {
             name: "watch_video".into(),
-            description: "看一段阿颜发来的视频并回答问题（你自己看不了视频时用）。path 用消息里给出的保存路径；question 写你想知道什么，不写则概括视频内容。".into(),
+            description: "看一段对方发来的视频并回答问题（你自己看不了视频时用）。path 用消息里给出的保存路径；question 写你想知道什么，不写则概括视频内容。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {"path": {"type": "string"}, "question": {"type": "string"}},
@@ -46,7 +46,7 @@ impl WatchVideo {
         let raw = args.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).ok_or("缺少 path")?;
         let path = within(Path::new(raw.trim_start_matches("file://")), &c.tools.media_dir)?;
         let question = args.get("question").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).unwrap_or("概括这段视频的内容。");
-        let pcfg = c.provider(&c.persona.provider).ok_or("唐语歌的模型提供方未配置")?;
+        let pcfg = c.provider(&c.persona.provider).ok_or("主对话模型提供方未配置")?;
         let model = c.tools.video_model.clone();
         if !pcfg.models.get(&model).is_some_and(|m| m.video) {
             return Err(format!("看视频的模型 {model} 不在模型目录中或不支持视频"));
@@ -95,7 +95,7 @@ fn within(path: &Path, root: &Path) -> Result<PathBuf, String> {
     let p = path.canonicalize().map_err(|_| "找不到这个视频文件".to_owned())?;
     let r = root.canonicalize().map_err(|_| "媒体目录不存在".to_owned())?;
     if !p.starts_with(&r) || !p.is_file() {
-        return Err("只能查看阿颜发来的、保存在媒体目录里的视频".into());
+        return Err("只能查看保存在媒体目录里的视频".into());
     }
     Ok(p)
 }

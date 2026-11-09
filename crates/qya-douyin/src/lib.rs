@@ -151,7 +151,7 @@ impl Douyin {
                 }
                 if p.job_id == job_id && now.duration_since(p.requested_at) < VERIFY_COOLDOWN {
                     return if p.sms_ready && p.expires_at > now {
-                        Ok(json!({"ok": true, "state": "ready", "message": "刚刚已请求短信验证码；请阿颜直接回复最新六位数字，不要反复请求发送。"}))
+                        Ok(json!({"ok": true, "state": "ready", "message": "刚刚已请求短信验证码；请直接回复最新六位数字，不要反复请求发送。"}))
                     } else {
                         Err("上次发码未确认或收码窗口已失效；请先查询原任务，稍后再请求。".into())
                     };
@@ -170,7 +170,7 @@ impl Douyin {
                     p.requesting = false;
                     p.sms_ready = true;
                 }
-                Ok(json!({"ok": true, "state": "ready", "message": "已请求发送短信。请阿颜在 QQ 私聊直接键入纯文本六位数字（不加前缀、不用语音或图片），程序会代填并点击验证；验证码不会进入模型或会话记录。尚未确认发布成功。"}))
+                Ok(json!({"ok": true, "state": "ready", "message": "已请求发送短信。请在 QQ 私聊直接键入纯文本六位数字（不加前缀、不用语音或图片），程序会代填并点击验证；验证码不会进入模型或会话记录。尚未确认发布成功。"}))
             }
             Ok(v) => {
                 *b = None;
@@ -193,7 +193,7 @@ impl Douyin {
                 return Intercept::Handled { notice: "验证码正在处理中，请先不要重复发送。".into(), work: None };
             }
             if !p.sms_ready || p.expires_at <= Instant::now() {
-                return Intercept::Handled { notice: "现在没有可用的发布收码窗口，这串数字没有交给语歌；需要的话让她查一下原发布任务。".into(), work: None };
+                return Intercept::Handled { notice: "现在没有可用的发布收码窗口，这串数字没有进入对话；需要的话可查询原发布任务。".into(), work: None };
             }
             p.processing = true;
             p.job_id.clone()
@@ -217,12 +217,12 @@ impl Douyin {
                         finished = true;
                         "验证码验证后，平台已确认提交发布。后续审核状态以抖音为准。"
                     }
-                    Some("needs_attention" | "unavailable" | "page_error") => "短信验证未通过或页面已失效；未重新上传、未再次点击发布。请让语歌查询原任务后再处理。",
-                    _ => "验证码已提交验证，尚未取得发布成功回执；请让语歌查询原发布任务，不要重新上传或重复发布。",
+                    Some("needs_attention" | "unavailable" | "page_error") => "短信验证未通过或页面已失效；未重新上传、未再次点击发布。请查询原任务后再处理。",
+                    _ => "验证码已提交验证，尚未取得发布成功回执；请查询原发布任务，不要重新上传或重复发布。",
                 }
             }
             Ok(v) if matches!(v["state"].as_str(), Some("needs_attention" | "unavailable" | "page_error")) => "短信验证未通过或页面已失效；未重新上传、未再次点击发布。",
-            _ => "验证码处理未确认完成；请让语歌查询原发布任务，不要重复发布或重新上传。",
+            _ => "验证码处理未确认完成；请查询原发布任务，不要重复发布或重新上传。",
         };
         {
             let mut b = self.binding.lock().expect("binding 锁中毒");
@@ -280,11 +280,11 @@ impl Douyin {
         let job = job_id.clone().unwrap_or_else(|| "?".into());
         let note = match state {
             "verification_required" if job_id.is_some() => match self.request_sms(&job).await {
-                Ok(_) => format!("〔抖音发布：计划 {token} 已提交（任务 {job}），平台要求短信验证，程序已请求发码。请提醒阿颜直接回复六位验证码。平台说明：{msg}〕"),
+                Ok(_) => format!("〔抖音发布：计划 {token} 已提交（任务 {job}），平台要求短信验证，程序已请求发码。请提醒对方直接回复六位验证码。平台说明：{msg}〕"),
                 Err(e) => format!("〔抖音发布：任务 {job} 需要短信验证，但请求发码失败：{e}〕"),
             },
             "published" => format!("〔抖音发布：计划 {token} 已确认提交发布（任务 {job}）。后续审核以抖音为准。平台说明：{msg}〕"),
-            "in_progress" => format!("〔抖音发布：任务 {job} 仍在进行中（已跟进 3 分钟）。阿颜问起时让创作专员查询该任务。平台说明：{msg}〕"),
+            "in_progress" => format!("〔抖音发布：任务 {job} 仍在进行中（已跟进 3 分钟）。对方问起时让创作专员查询该任务。平台说明：{msg}〕"),
             _ => format!("〔抖音发布：计划 {token} 当前状态 {state}（任务 {job}）。平台说明：{msg}。不要自动重试，需要时让创作专员按恢复指引处理。〕"),
         };
         Outcome { user_notice: None, persona_note: Some(note) }

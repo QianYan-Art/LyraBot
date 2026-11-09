@@ -38,7 +38,7 @@ impl Mail {
             description: "操作邮件 VPS（可托管多个域名，以查询结果为准）。\
                 list_mailboxes 列出邮箱：没有明确指定域名时不要传 domain 和 limit；若 matched 大于返回数说明被截断。\
                 read 读最新邮件（默认 1 封），可用 from_contains/subject_contains/body_contains 筛选；找验证码加 require_code，找验证链接加 require_link。\
-                list_attachments / fetch_attachment 取附件（附件文件会自动发给阿颜）。验证链接较长时会导出成 txt 文件一并发出，文字里只能逐字原样给出链接，不得改写或打码。\
+                list_attachments / fetch_attachment 取附件（附件文件会自动随回复发出）。验证链接较长时会导出成 txt 文件一并发出，文字里只能逐字原样给出链接，不得改写或打码。\
                 send / reply / forward / trash / delete 是写操作：只执行任务里明确要求的那一封、那个收件人；失败或超时不要重试，先用 read 核实结果。\
                 后续操作需要 message_ref，读邮件时保留它。".into(),
             parameters: json!({
@@ -212,7 +212,7 @@ impl Tool for Mail {
             text.push_str("\n写操作未确认成功：不要重试，先用 read 核实远端实际状态再汇报。");
         }
         if !media.is_empty() {
-            text.push_str(&format!("\n已准备发送 {} 个文件给阿颜。", media.len()));
+            text.push_str(&format!("\n已准备发送 {} 个文件。", media.len()));
         }
         ToolOutput { text, is_error: !ok, media }
     }

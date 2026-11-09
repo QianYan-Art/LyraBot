@@ -26,7 +26,7 @@ impl Recall {
     pub fn new(store: Store) -> Self {
         let spec = ToolSpec {
             name: "recall".into(),
-            description: "翻找你和阿颜以前的聊天记录（之前的会话与摘要）。阿颜提到“上次”“之前说过”“那天聊的”而当前上下文里没有时用。\
+            description: "翻找你们以前的聊天记录（之前的会话与摘要）。对方提到“上次”“之前说过”“那天聊的”而当前上下文里没有时用。\
                           query 写可能原样出现的关键词，可用空格写几个不同说法（如“苏州 园林 旅游”）；想不出关键词或没搜到时留空，\
                           会返回之前最近的一段对话。"
                 .into(),
@@ -81,7 +81,7 @@ pub fn render_recent(hits: &[RecallHit]) -> String {
     let mut used = 0;
     for h in hits {
         let who = match h.role.as_str() {
-            "user" => "阿颜",
+            "user" => "对方",
             "assistant" => "你",
             _ => "当时的摘要",
         };
@@ -94,7 +94,7 @@ pub fn render_recent(hits: &[RecallHit]) -> String {
         lines.push(line);
     }
     lines.reverse();
-    format!("之前最近的一段对话（旧记录，不是阿颜的新消息）：\n{}", lines.join("\n"))
+    format!("之前最近的一段对话（旧记录，不是对方的新消息）：\n{}", lines.join("\n"))
 }
 
 /// 渲染命中：跳过当前会话（已在上下文里），按条数与总字数限长。
@@ -103,7 +103,7 @@ pub fn render(hits: &[RecallHit], query: &str, current: i64) -> String {
     let mut used = 0;
     for h in hits.iter().filter(|h| h.session != current).take(MAX_HITS) {
         let who = match h.role.as_str() {
-            "user" => "阿颜",
+            "user" => "对方",
             "assistant" => "你",
             _ => "当时的摘要",
         };
@@ -115,9 +115,9 @@ pub fn render(hits: &[RecallHit], query: &str, current: i64) -> String {
         out.push(line);
     }
     if out.is_empty() {
-        format!("以前的聊天里没有找到“{query}”。可以换几个说法再试，或者 query 留空看之前最近的一段对话；还是没有就如实告诉阿颜不记得了")
+        format!("以前的聊天里没有找到“{query}”。可以换几个说法再试，或者 query 留空看之前最近的一段对话；还是没有就如实告诉对方不记得了")
     } else {
-        format!("以前的聊天记录（新的在前，这是旧记录，不是阿颜的新消息）：\n{}", out.join("\n"))
+        format!("以前的聊天记录（新的在前，这是旧记录，不是对方的新消息）：\n{}", out.join("\n"))
     }
 }
 
@@ -161,7 +161,7 @@ mod tests {
         let hits = vec![hit(9, "user", "当前会话里的年糕"), hit(2, "user", &long), hit(3, "summary", "聊过年糕的饮食")];
         let out = render(&hits, "年糕", 9);
         assert!(!out.contains("当前会话"), "{out}");
-        assert!(out.contains("阿颜] …") && out.contains("我家猫叫年糕") && out.contains("当时的摘要"), "{out}");
+        assert!(out.contains("对方] …") && out.contains("我家猫叫年糕") && out.contains("当时的摘要"), "{out}");
         assert!(!out.contains(&"前".repeat(80)), "长文本只取命中附近");
         assert!(render(&[], "不存在", 1).contains("没有找到"));
         let recent = render_recent(&[hit(2, "assistant", "后说的"), hit(2, "user", "先说的")]);

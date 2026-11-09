@@ -23,9 +23,9 @@ impl DelegateTool {
         targets.extend(o.specialists.keys().cloned());
         let specialists: Vec<String> = o.specialists.iter().map(|(n, s)| format!("{n}（{}）", s.description)).collect();
         let description = format!(
-            "把需要真正动手的活交给后台执行者：查资料、运维、写代码、生成内容等多步或耗时的事。交出去后先简单告诉阿颜你安排了，不要说已经做完；结果会以〔后台结果〕交回给你，再由你告诉阿颜。\
+            "把需要真正动手的活交给后台执行者：查资料、运维、写代码、生成内容等多步或耗时的事。交出去后先简单告诉对方你安排了，不要说已经做完；结果会以〔后台结果〕交回给你，再由你告诉对方。\
              to：worker 是临时执行者{}。context：brief（默认，只给任务和你写的 context_note）、fork（继承你们当前的完整对话，适合“刚才说的那个”）、fresh（空白开始）。\
-             model 与 effort 一般不用填（默认 {} / {}），阿颜指定时再填。",
+             model 与 effort 一般不用填（默认 {} / {}），对方指定时再填。",
             if specialists.is_empty() { String::new() } else { format!("；常驻专员：{}", specialists.join("；")) },
             o.default_model,
             o.default_effort
@@ -42,7 +42,7 @@ impl DelegateTool {
                     "context_note": {"type": "string", "description": "brief 时给执行者的背景说明"},
                     "model": {"type": "string", "enum": models},
                     "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh", "max"]},
-                    "notify": {"type": "string", "enum": ["relay", "silent"], "description": "relay（默认）完成后立刻交回；silent 等阿颜下次说话时再带上"}
+                    "notify": {"type": "string", "enum": ["relay", "silent"], "description": "relay（默认）完成后立刻交回；silent 等对方下次说话时再带上"}
                 },
                 "required": ["task"],
                 "additionalProperties": false
@@ -104,7 +104,7 @@ impl AgentCtlTool {
     pub fn new(sup: Supervisor) -> Self {
         let spec = ToolSpec {
             name: "agent_ctl".into(),
-            description: "查看或管理后台执行者。status：列出后台任务和进度（阿颜问进度时用）；continue：给某个任务补充要求或在已完成的任务上继续追问；stop：停下某个任务。".into(),
+            description: "查看或管理后台执行者。status：列出后台任务和进度（对方问进度时用）；continue：给某个任务补充要求或在已完成的任务上继续追问；stop：停下某个任务。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -179,7 +179,7 @@ impl ReportProgress {
     pub(crate) fn new(handle: Arc<Handle>) -> Self {
         let spec = ToolSpec {
             name: "report_progress".into(),
-            description: "简短汇报当前进度（一句话），阿颜查看后台任务时能看到。长任务每完成一个阶段汇报一次即可。".into(),
+            description: "简短汇报当前进度（一句话），查看后台任务时能看到。长任务每完成一个阶段汇报一次即可。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {"progress": {"type": "string"}},
@@ -210,7 +210,7 @@ impl Tool for ReportProgress {
     }
 }
 
-/// 执行者提出需要阿颜拍板的问题；汇报时单独交给唐语歌原样转达。
+/// 执行者提出需要用户拍板的问题；汇报时单独交给主对话角色原样转达。
 pub(crate) struct NeedDecision {
     handle: Arc<Handle>,
     spec: ToolSpec,
@@ -220,7 +220,7 @@ impl NeedDecision {
     pub(crate) fn new(handle: Arc<Handle>) -> Self {
         let spec = ToolSpec {
             name: "need_decision".into(),
-            description: "只有必须由阿颜拍板才能继续时调用（例如二选一的方案、要不要执行不可撤回的操作）：写一个具体、能直接回答的问题，可列选项。调用后收尾本轮，汇报里写清已完成的部分，不必重复这个问题。已经被授权的事不要再问。".into(),
+            description: "只有必须由用户拍板才能继续时调用（例如二选一的方案、要不要执行不可撤回的操作）：写一个具体、能直接回答的问题，可列选项。调用后收尾本轮，汇报里写清已完成的部分，不必重复这个问题。已经被授权的事不要再问。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {"question": {"type": "string"}},
@@ -244,7 +244,7 @@ impl Tool for NeedDecision {
         match s(&args, "question").map(str::trim).filter(|q| !q.is_empty()) {
             Some(q) => {
                 self.handle.set_question(q);
-                ToolOutput::ok("已记录，会随汇报交给阿颜。现在收尾本轮。")
+                ToolOutput::ok("已记录，会随汇报交回。现在收尾本轮。")
             }
             None => ToolOutput::err("缺少 question"),
         }

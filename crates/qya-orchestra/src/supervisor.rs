@@ -31,7 +31,7 @@ const QUESTION_LIMIT: usize = 300;
 const INTERRUPTED_SUMMARY: &str = "服务重启时这个任务还没做完，已有进展保存在它的会话里。需要的话用 agent_ctl continue 续接；续接时它会先核对已经做过的部分，不重复外部操作。";
 /// fork 模式下为唐语歌那次 delegate 调用补的工具结果。
 const FORK_PLACEHOLDER: &str = "（这件事已交给后台执行者处理）";
-const FORK_INSTRUCTION: &str = "〔以上是唐语歌和阿颜的对话，供你了解来龙去脉。从现在起你是后台执行者，不扮演唐语歌，不对阿颜说话，只完成下面的任务并按系统提示写汇报。〕";
+const FORK_INSTRUCTION: &str = "〔以上是主对话角色与用户的对话，供你了解来龙去脉。从现在起你是后台执行者，不扮演角色，不对用户直接说话，只完成下面的任务并按系统提示写汇报。〕";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextMode {
@@ -105,7 +105,7 @@ impl WorkerStatus {
             Self::Queued => "排队中",
             Self::Running => "进行中",
             Self::Done => "已完成",
-            Self::Waiting => "等阿颜决定",
+            Self::Waiting => "等待决定",
             Self::Failed => "失败",
             Self::Cancelled => "已停止",
             Self::Interrupted => "被中断",

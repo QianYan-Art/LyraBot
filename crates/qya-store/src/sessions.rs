@@ -320,7 +320,7 @@ impl Store {
                 .optional()?
                 .ok_or_else(|| StoreError::NotFound(format!("会话 {target}")))?;
             if row.kind != SessionKind::Persona {
-                return Err(StoreError::Invalid(format!("#{target} 不是唐语歌的会话，无法切换")));
+                return Err(StoreError::Invalid(format!("#{target} 不是主对话会话，无法切换")));
             }
             let now = now_ms();
             if old != target {

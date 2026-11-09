@@ -70,17 +70,17 @@ pub fn to_parts(p: &Parsed, saved: &[Download]) -> Vec<ContentPart> {
     for (a, dl) in p.attachments.iter().zip(saved) {
         match (a, dl) {
             (Attachment::Voice { asr: Some(t) }, _) => notes.push(format!("〔语音转文字〕{t}")),
-            (Attachment::Voice { asr: None }, _) => notes.push("〔阿颜发了一段语音，但没有拿到识别文字〕".to_owned()),
+            (Attachment::Voice { asr: None }, _) => notes.push("〔对方发了一段语音，但没有拿到识别文字〕".to_owned()),
             (Attachment::Image { .. }, Download::Saved(path)) => media.push(ContentPart::Image { url: file_url(path) }),
             (Attachment::Image { .. }, Download::TooLarge(b)) => {
                 notes.push(format!("〔一张图片（{:.1} MB）超过 {cap_mb} MB 下载上限，未保存〕", mb(*b)));
             }
             (Attachment::Image { .. }, Download::Failed) => notes.push("〔一张图片下载失败〕".to_owned()),
             (Attachment::Video { name, .. }, Download::Saved(path)) => {
-                notes.push(format!("〔阿颜发来视频 {name}，已保存到 {}〕", path.display()));
+                notes.push(format!("〔对方发来视频 {name}，已保存到 {}〕", path.display()));
                 media.push(ContentPart::Video { url: file_url(path) });
             }
-            (Attachment::File { name, .. }, Download::Saved(path)) => notes.push(format!("〔阿颜发来文件 {name}，已保存到 {}〕", path.display())),
+            (Attachment::File { name, .. }, Download::Saved(path)) => notes.push(format!("〔对方发来文件 {name}，已保存到 {}〕", path.display())),
             (Attachment::Video { name, .. } | Attachment::File { name, .. }, Download::TooLarge(b)) => {
                 notes.push(format!("〔附件 {name}（{:.1} MB）超过 {cap_mb} MB 下载上限，未保存〕", mb(*b)));
             }
@@ -148,7 +148,7 @@ mod tests {
         ];
         let parts = to_parts(&p, &saved);
         let ContentPart::Text { text } = &parts[0] else { panic!() };
-        assert!(text.starts_with("看看这个\n〔语音转文字〕晚上吃什么\n〔阿颜发来视频 猫.mp4"));
+        assert!(text.starts_with("看看这个\n〔语音转文字〕晚上吃什么\n〔对方发来视频 猫.mp4"));
         assert!(text.ends_with("〔附件 报告.pdf（60.0 MB）超过 50 MB 下载上限，未保存〕"));
         assert_eq!(parts[1], ContentPart::Image { url: "file:///m/a.jpg".into() });
         assert_eq!(parts[2], ContentPart::Video { url: "file:///m/b.mp4".into() });

@@ -89,7 +89,7 @@ cargo test --workspace
 
 ## 自定义角色与称呼
 
-仓库默认自带作者自用的角色“唐语歌”与称呼“阿颜”作为完整生产示例。角色名与用户称呼已从代码中解耦，替换成你自己的角色**不需要修改 Rust 代码**，只需调整 `assets/persona/` 目录：
+仓库默认自带作者自用的角色“唐语歌”与称呼“阿颜”作为完整生产示例。所有内置工具说明、后台执行者提示词（`assets/agents/worker.md`）与 `qya-docs` 技能均已使用通用表述，角色名与用户称呼已从代码中完全解耦。替换成你自己的角色**不需要修改 Rust 代码**，只需调整 `assets/persona/` 目录（首次部署时亦可按需调整或清空 `assets/memory_seed/` 下的初始记忆种子）：
 
 1. **修改你的称呼**：编辑 `assets/persona/persona.toml` 中的 `user_name = "你的称呼"`。
 2. **替换角色卡**：用你的 SillyTavern 角色卡覆盖 `assets/persona/card.json`（支持标准 `chara_card_v2` 顶层结构或 `{"spec": "chara_card_v2", "data": {...}}` 包装结构）。角色名直接取自卡内的 `name` 字段；角色卡与所有 `.md` 文件中的 `{{char}}`、`{{user}}` 占位符会在渲染时自动替换。
@@ -113,7 +113,7 @@ cargo test --workspace
 | `/status` | 版本、模型、上下文占用、缓存命中、内存 |
 | `/new` · `/stop` · `/compact` | 新会话 · 停止当前回复 · 压缩会话并刷新记忆快照 |
 | `/sessions [编号]` · `/gc [天数]` | 查看会话与数据库或切回历史会话 · 清理历史会话（默认 30 天，另有每周自动清理） |
-| `/model [名]` · `/effort [等级]` | 切换唐语歌的模型与思考等级 |
+| `/model [名]` · `/effort [等级]` | 切换主对话的模型与思考等级 |
 | `/agent [list · <编号> [stop/话]]` | 查看后台任务列表，或查看详情、停止、续接任务 |
 | `/provider [类别 字段 值]` | 查看或修改生图、语音、搜索（含 grok）提供方 |
 | `/learn [list 说法/记忆 · forget · now · undo · on/off]` | 学习与记忆：总览、查看说法或记忆、删除、立即整理、撤销 |

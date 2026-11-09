@@ -19,9 +19,9 @@ impl Speak {
     pub fn new(host: Host) -> Self {
         let spec = ToolSpec {
             name: "speak".into(),
-            description: "用你的声音把一段话合成语音发给阿颜（阿颜说“说……”“发语音”时用）。text 写要说的话本身，口语化，不带动作描写。\
+            description: "用你的声音把一段话合成语音发出（对方说“说……”“发语音”时用）。text 写要说的话本身，口语化，不带动作描写。\
                 语气由你判断：可选 scene（场景）、profile（音色配置）、reference（参考音频），优先级 reference > profile > scene，省略时工作站自动选择；\
-                只使用已知存在的名字，不要猜。语音在独立工作站生成，离线或失败时如实告诉阿颜，不要说已经发了。".into(),
+                只使用已知存在的名字，不要猜。语音在独立工作站生成，离线或失败时如实告诉对方，不要说已经发了。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -78,7 +78,7 @@ impl Speak {
         }
         wav_ok(&bytes).map_err(|e| format!("工作站{e}"))?;
         let path = save(&c.tools.media_dir, "voice", "wav", &bytes).await.map_err(|e| format!("保存语音失败：{e}"))?;
-        Ok(ToolOutput { text: "语音已生成，会随回复发给阿颜。".into(), is_error: false, media: vec![path] })
+        Ok(ToolOutput { text: "语音已生成，会随回复发出。".into(), is_error: false, media: vec![path] })
     }
 }
 

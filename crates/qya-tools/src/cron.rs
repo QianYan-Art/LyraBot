@@ -83,8 +83,8 @@ impl CronTool {
         let spec = ToolSpec {
             name: "cron".into(),
             description: "管理定时任务（时间按北京时间）。schedule 是 5 段 cron：分 时 日 月 周，例如每天 9 点“0 9 * * *”、工作日 18:30“30 18 * * 1-5”。\
-                          kind=remind 到点由你提醒阿颜 text 的内容；kind=task 到点把 task 派给后台（to 选执行者或专员），结果再交回给你。                          只在某一天发生的事（“明天 9 点”“11 月 10 日”）要设 once=true，触发一次后自动删除；不设就是每年、每月或每天重复。\
-                          add 前先和阿颜确认时间与内容。".into(),
+                          kind=remind 到点由你提醒对方 text 的内容；kind=task 到点把 task 派给后台（to 选执行者或专员），结果再交回给你。                          只在某一天发生的事（“明天 9 点”“11 月 10 日”）要设 once=true，触发一次后自动删除；不设就是每年、每月或每天重复。\
+                          add 前先和对方确认时间与内容。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {

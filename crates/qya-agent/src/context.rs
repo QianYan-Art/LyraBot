@@ -12,7 +12,7 @@ pub struct Compaction {
     pub tokens_before: u64,
 }
 
-pub const SUMMARY_PREFIX: &str = "【更早对话的摘要，供你延续上下文；不是阿颜的新消息】\n";
+pub const SUMMARY_PREFIX: &str = "【更早对话的摘要，供你延续上下文；不是对方的新消息】\n";
 
 /// 折叠条目的载荷：`before` 之前的工具结果在上下文中替换为一行占位（原文仍在记录里）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,7 +89,7 @@ pub fn render_compaction(output: &str) -> String {
     if let Some(o) = cap["objective"].as_str().map(str::trim).filter(|o| !o.is_empty()) {
         capsule.push_str(&format!("【当前目标】{}\n", clip(o, CAPSULE_ITEM_CHARS)));
     }
-    for (key, label) in [("constraints", "阿颜的要求与约束"), ("decisions", "已确认的决定"), ("verification", "验证状态"), ("next_steps", "下一步")] {
+    for (key, label) in [("constraints", "用户的要求与约束"), ("decisions", "已确认的决定"), ("verification", "验证状态"), ("next_steps", "下一步")] {
         let items: Vec<String> = cap[key]
             .as_array()
             .into_iter()
@@ -194,7 +194,7 @@ mod tests {
 ```"#;
         assert_eq!(
             render_compaction(out),
-            "- 1 月 5 日前交稿\n- 阿颜纠正：用北京时间\n\n【当前目标】整理周报\n【阿颜的要求与约束】\n- 不要用表格\n【下一步】\n- 补数据"
+            "- 1 月 5 日前交稿\n- 阿颜纠正：用北京时间\n\n【当前目标】整理周报\n【用户的要求与约束】\n- 不要用表格\n【下一步】\n- 补数据"
         );
         assert_eq!(render_compaction("只是一段纯文本摘要"), "只是一段纯文本摘要");
         assert_eq!(render_compaction(r#"{"summary": "半截"#), "", "残缺 JSON 不进摘要");

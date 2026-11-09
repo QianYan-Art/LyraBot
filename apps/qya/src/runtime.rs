@@ -774,7 +774,7 @@ impl Runtime {
         let o = match result {
             Ok(o) => o,
             Err(e) => {
-                tracing::error!(error = %e, "唐语歌本轮失败");
+                tracing::error!(error = %e, "主对话本轮失败");
                 if streaming {
                     platform.stream_end().await;
                 }
@@ -791,7 +791,7 @@ impl Runtime {
                 let _ = platform.send(Outbound::text("（工具调用陷入重复，已停下）")).await;
             }
             StopReason::Error => {
-                tracing::error!(error = ?o.error, "唐语歌本轮模型请求失败");
+                tracing::error!(error = ?o.error, "主对话本轮模型请求失败");
                 let _ = platform.send(Outbound::text(friendly(o.error.as_ref().map(|e| e.kind)))).await;
                 return;
             }

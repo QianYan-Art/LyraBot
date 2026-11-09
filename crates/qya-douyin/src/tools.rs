@@ -30,8 +30,8 @@ impl DouyinLogin {
         let spec = ToolSpec {
             name: "douyin_login".into(),
             description: "检查服务器上的抖音登录，或应要求/登录失效时获取扫码二维码。status 不刷新页面；login 只取登录二维码，不上传、不发布。\
-                二维码会自动随结果发给阿颜，说明用抖音手机端扫码即可。已有二维码时不要重复 login，阿颜说扫完后用 status 检查。\
-                验证受阻请阿颜人工处理，不反复重试。服务器离线或页面未知不等于已退出登录。".into(),
+                二维码会自动随结果发出，说明用抖音手机端扫码即可。已有二维码时不要重复 login，扫码完成后用 status 检查。\
+                验证受阻请人工处理，不反复重试。服务器离线或页面未知不等于已退出登录。".into(),
             parameters: json!({"type": "object", "properties": {"action": {"type": "string", "enum": ["status", "login"]}}, "required": ["action"], "additionalProperties": false}),
         };
         Self { spec, dy }
@@ -48,7 +48,7 @@ async fn login_response(dy: &Douyin, action: &str, recover: bool) -> Result<(Val
             return Err("意外的二维码响应".into());
         }
         media.push(save_qr(qr, &dy.cache_dir)?);
-        out["delivery"] = json!("二维码会随结果发给阿颜，提醒他用抖音手机端扫码。");
+        out["delivery"] = json!("二维码会随结果发出，提醒对方用抖音手机端扫码。");
     }
     Ok((out, media))
 }
@@ -86,14 +86,14 @@ impl DouyinContent {
             name: "douyin_content".into(),
             description: "管理抖音作品。先用 list 选择服务器上的成品；后台横封面槽为 4:3、竖封面槽为 3:4；9:16 只是可能的素材版本，不是竖槽比例。\
 已有封面优先用 cover_library 浏览（可传 release_id 筛选、offset 按 next_offset 翻页），区分来源并检查双槽预览。\
-阿颜已在固定制作目录放好素材时，用 cover_saved_sources 加 release_id 查看本地候选及实际比例，不要让他重新发送或传任意路径；分别用两张候选的 image_id 调 cover_import_saved 入库，再用 cover_pair 传 landscape_cover_id 和 portrait_cover_id 组合，单图导入只是一个候选。\
+已在固定制作目录放好素材时，用 cover_saved_sources 加 release_id 查看本地候选及实际比例，不要让用户重新发送或传任意路径；分别用两张候选的 image_id 调 cover_import_saved 入库，再用 cover_pair 传 landscape_cover_id 和 portrait_cover_id 组合，单图导入只是一个候选。\
 QQ 图片可用 cover_sources / cover_import 单图入库。复用库中封面用 cover_reuse（目标 release_id、来源 from_release_id、来源 cover_id），取得目标的新 cover_id 后再 prepare，不能把别的作品的旧 ID 直接用于目标作品。\
-封面预览会自动发给阿颜核对。阿颜选定后用 prepare（必须传 cover_id）确认标题、简介、封面、可见范围和可选定时（publish_at 带时区）；prepare 返回 plan.plan_id，stage/resume_stage/draft 必须完整传入，不缩略。\
-需要发布时用 stage 上传并生成平台待确认预览；editor_ready 只表示预览就绪，不等于阿颜已授权。要存草稿就调用 draft。\
-公开发布不由你执行：stage 完成后告诉阿颜在 QQ 私聊发送“确认发布 <plan_id>”，程序会直接提交并跟进；你没有、也不需要发布动作。\
+封面预览会自动发出供核对。选定后用 prepare（必须传 cover_id）确认标题、简介、封面、可见范围和可选定时（publish_at 带时区）；prepare 返回 plan.plan_id，stage/resume_stage/draft 必须完整传入，不缩略。\
+需要发布时用 stage 上传并生成平台待确认预览；editor_ready 只表示预览就绪，不等于已获授权。要存草稿就调用 draft。\
+公开发布不由你执行：stage 完成后提醒在 QQ 私聊发送“确认发布 <plan_id>”，程序会直接提交并跟进；你没有、也不需要发布动作。\
 上传是后台任务，in_progress 时如实汇报当前阶段并结束本轮，不要循环轮询；之后可用 job 查询同一任务。预览最长有效 15 分钟，stage 后不要调用 login/status/metrics 或另一次 prepare（会导航使预览失效），job 查询不会导航。\
-按 recovery.action 处理错误：resume_stage 用相同 plan_id 调 resume_stage；prepare 表示可重新准备；login 会自动附二维码；manual_verification/check_account 需要阿颜处理；inspect_result 表示已尝试提交且结果待核查，禁止重试。\
-合集、位置、下载权限、付费与商品链接尚未接入，阿颜要求时说明限制。".into(),
+按 recovery.action 处理错误：resume_stage 用相同 plan_id 调 resume_stage；prepare 表示可重新准备；login 会自动附二维码；manual_verification/check_account 需要人工处理；inspect_result 表示已尝试提交且结果待核查，禁止重试。\
+合集、位置、下载权限、付费与商品链接尚未接入，被要求时说明限制。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -154,7 +154,7 @@ pub fn validate(args: &Value) -> Result<String, String> {
         }
         "stage" | "resume_stage" | "draft" => only(&["action", "plan_id"]) && is_token(s("plan_id")),
         "job" => only(&["action", "job_id"]) && is_hex32(s("job_id")),
-        "publish" => return Err("公开发布由阿颜在 QQ 发送“确认发布 <plan_id>”后由程序直接提交，你不能调用发布。".into()),
+        "publish" => return Err("公开发布由用户在 QQ 发送“确认发布 <plan_id>”后由程序直接提交，你不能调用发布。".into()),
         _ => false,
     };
     if ok { Ok(a) } else { Err(format!("{a} 的参数无效；未执行任何操作。stage/draft 使用 prepare 返回的完整 plan_id。")) }
@@ -184,7 +184,7 @@ impl DouyinContent {
         let request = match action.as_str() {
             "stage" | "resume_stage" | "draft" => json!({"action": action, "token": args["plan_id"]}),
             "cover_import" => {
-                let path = dy.registered_image(args["image_id"].as_str().unwrap_or_default()).ok_or("这张图片来源已过期或不可用；请阿颜重新发送图片。")?;
+                let path = dy.registered_image(args["image_id"].as_str().unwrap_or_default()).ok_or("这张图片来源已过期或不可用；请重新发送图片。")?;
                 let meta = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
                 if !meta.file_type().is_file() || meta.len() > crate::covers::MAX_IMAGE_BYTES {
                     return Err("图片来源不可用".into());
@@ -229,7 +229,7 @@ impl DouyinContent {
                 }
                 Err(_) => v["login"] = json!({"ok": false, "state": "unavailable", "message": "未能取得登录二维码；请检查状态，不重提作品。"}),
             }
-            v["recovery_instruction"] = json!("先向阿颜说明登录状态；有二维码时已随结果发出。扫码后检查登录状态，重新 prepare 核对作品；旧预览不沿用，不自动重新上传。");
+            v["recovery_instruction"] = json!("先说明登录状态；有二维码时已随结果发出。扫码后检查登录状态，重新 prepare 核对作品；旧预览不沿用，不自动重新上传。");
         }
         Ok(reply(v, media))
     }
@@ -258,7 +258,7 @@ impl DouyinVerification {
         let spec = ToolSpec {
             name: "douyin_verification".into(),
             description: "发布任务明确等待短信验证、而程序没有自动发码时，传当前 job_id 请求发送验证码；不重新上传或再点发布。\
-                成功后提醒阿颜在 QQ 私聊键入纯文本六位数字，程序会安全接收、代填并点击验证。不要向工具参数传验证码。发码不等于发布成功，不要反复发码。".into(),
+                成功后提醒在 QQ 私聊键入纯文本六位数字，程序会安全接收、代填并点击验证。不要向工具参数传验证码。发码不等于发布成功，不要反复发码。".into(),
             parameters: json!({"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"], "additionalProperties": false}),
         };
         Self { spec, dy }

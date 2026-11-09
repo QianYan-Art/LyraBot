@@ -176,7 +176,7 @@ impl Courier {
     }
 
     async fn defer(&self, part: Value) -> Result<(), SendError> {
-        tracing::info!("没有可用的 QQ 回复通道（被动窗口已过且主动额度用尽），延迟到阿颜下次说话");
+        tracing::info!("没有可用的 QQ 回复通道（被动窗口已过且主动额度用尽），延迟到用户下次说话");
         match self.store.outbox_push(CHANNEL, part, MAX_DEFERRED).await {
             Ok(0) => Ok(()),
             Ok(n) => {

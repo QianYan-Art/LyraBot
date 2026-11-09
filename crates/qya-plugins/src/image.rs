@@ -29,8 +29,8 @@ impl ImageGenerate {
     pub fn new(host: Host) -> Self {
         let spec = ToolSpec {
             name: "image_generate".into(),
-            description: "生成或修改图片，成功后图片会自动发给阿颜，不用在文字里贴路径。prompt 写清画面内容、风格与构图。\
-                aspect_ratio：square（默认）/ landscape 横图 / portrait 竖图。阿颜说低/中/高质量时传 quality=low/medium/high，没说就不传。\
+            description: "生成或修改图片，成功后图片会自动随回复发出，不用在文字里贴路径。prompt 写清画面内容、风格与构图。\
+                aspect_ratio：square（默认）/ landscape 横图 / portrait 竖图。要求低/中/高质量时传 quality=low/medium/high，没说就不传。\
                 改图或参考图时把图片的本地路径或 URL 放进 input_images，局部重绘再给 mask。生成需要几十秒到数分钟。".into(),
             parameters: json!({
                 "type": "object",
@@ -137,7 +137,7 @@ impl ImageGenerate {
             return Err("生图接口返回的数据里没有图片".into());
         }
         let mut msg = format!(
-            "已生成 {} 张图（提供方 {}，模型 {model}，质量 {quality}，{size}），会随回复发给阿颜。",
+            "已生成 {} 张图（提供方 {}，模型 {model}，质量 {quality}，{size}），会随回复发出。",
             paths.len(),
             p.name
         );

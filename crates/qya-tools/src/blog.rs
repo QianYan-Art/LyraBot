@@ -20,7 +20,7 @@ impl BlogSync {
         let spec = ToolSpec {
             name: "blog_sync".into(),
             description: format!(
-                "执行博客文章同步（把知识库文章同步到博客）。阿颜说“博客同步 / 同步博客文章”时调用。脚本优先走代理，失败会自动回退直连，正常约 2 分钟，最长 {} 秒；中途不要重复调用。",
+                "执行博客文章同步（把知识库文章同步到博客）。收到“博客同步 / 同步博客文章”指令时调用。脚本优先走代理，失败会自动回退直连，正常约 2 分钟，最长 {} 秒；中途不要重复调用。",
                 timeout_s
             ),
             parameters: json!({"type": "object", "properties": {}, "additionalProperties": false}),
