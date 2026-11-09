@@ -29,6 +29,7 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料（persona
 - S2 会话创建时生成并冻结在 kv `persona_s2:<session>`，压缩后刷新，保证同一会话前缀字节稳定；记忆改动因此在新会话或压缩后生效。
 - 原 Hermes 的 `skill_view(tangyuge-roleplay)` 改为专用轻工具 `persona_notes(topic)`，条目与用途写在工具说明里。Hermes 的 `SOUL.md`（工作风格）不进入唐语歌提示，留给后台执行者；`MEMORY.md` 的运维流程迁到专员记忆种子（`assets/memory_seed/`）。
 - 唐语歌只用轻工具：`persona.tools` 默认 image_generate、speak、web_search、cron、skill_view、recall，另有人格专属 persona_notes、delegate、agent_ctl、memory、sticker；注册了 watch_video 时自动带上。重活经 delegate 派出（见 `05-orchestra.md`）。
+- 派活时 task 照阿颜的原话写，不自己补充没说的范围或指标，拿不准先问。
 - 唐语歌不会主动开口：答应“到时候提醒你”这类有时间的事，当场用 cron 设好并告诉阿颜（具体某天的用一次性提醒），时间未定先问清楚。
 - 渲染卫生由 `crates/qya-persona/tests/persona.rs` 断言（首块为身份、段落顺序、无 Hermes/UI/占位符残留、重复渲染字节一致）。
 

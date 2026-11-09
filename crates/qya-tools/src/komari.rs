@@ -21,7 +21,9 @@ impl KomariReport {
     pub fn new(config: PathBuf) -> Self {
         let spec = ToolSpec {
             name: "komari_report".into(),
-            description: "生成流量日报：只读查询 Komari 全部公开可见节点近 24 小时（UTC）的上下行流量。阿颜说“流量日报”时调用，把返回的 report 原样交回；缺数据的节点不记为零。".into(),
+            description: "生成流量日报：只读查询 Komari 探针里全部公开可见节点（各台服务器）近 24 小时（UTC）的上下行流量。\
+                          阿颜说“流量日报”“流量报告”“服务器流量”“探针流量”时调用，把返回的 report 原样交回；缺数据的节点不记为零。\
+                          网站访问量、访客统计是另一回事，只有阿颜明确说网站或博客时才去看 nginx 日志。".into(),
             parameters: json!({"type": "object", "properties": {}, "additionalProperties": false}),
         };
         Self { spec, config }
