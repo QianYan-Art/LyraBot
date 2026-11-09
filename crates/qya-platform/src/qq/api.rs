@@ -4,7 +4,8 @@ use crate::{SendError, SendErrorKind};
 use base64::Engine;
 use qya_config::QqConfig;
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
@@ -12,11 +13,38 @@ pub const MSG_TYPE_TEXT: u32 = 0;
 pub const MSG_TYPE_MEDIA: u32 = 7;
 /// 内联 base64 上传的上限（QQ 约 10 MB，留余量）
 pub const INLINE_UPLOAD_MAX: usize = 9 * 1024 * 1024;
+/// 入站附件流式下载的大小上限（50 MB）与并发上限。
+pub const DOWNLOAD_MAX_BYTES: u64 = 50 * 1024 * 1024;
+pub const DOWNLOAD_CONCURRENCY: usize = 2;
+
+static DL_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// 入站附件的下载结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Download {
+    /// 已流式落盘
+    Saved(PathBuf),
+    /// 超过入站大小上限（附已知字节数）
+    TooLarge(u64),
+    /// 下载失败或无需下载（如语音）
+    Failed,
+}
+
+struct PartGuard(Option<PathBuf>);
+
+impl Drop for PartGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
 
 pub struct Api {
     cfg: QqConfig,
     http: reqwest::Client,
     token: Mutex<Option<(String, Instant)>>,
+    dl_sem: tokio::sync::Semaphore,
 }
 
 /// 富媒体类型：1 图片、2 视频、3 语音、4 文件。
@@ -55,7 +83,7 @@ impl Api {
             .timeout(Duration::from_secs(120))
             .build()
             .expect("构建 HTTP 客户端");
-        Self { cfg, http, token: Mutex::new(None) }
+        Self { cfg, http, token: Mutex::new(None), dl_sem: tokio::sync::Semaphore::new(DOWNLOAD_CONCURRENCY) }
     }
 
     pub fn cfg(&self) -> &QqConfig {
@@ -152,25 +180,81 @@ impl Api {
             .ok_or_else(|| err(SendErrorKind::Unknown, "上传成功但没有返回 file_info"))
     }
 
-    /// 下载入站附件到目录，返回路径。
-    pub async fn download(&self, url: &str, dir: &Path, name: &str) -> Option<std::path::PathBuf> {
-        let resp = self.http.get(url).timeout(Duration::from_secs(60)).send().await.ok()?;
+    /// 流式下载入站附件到目录：受并发信号量与字节数上限约束，超限、失败或任务取消时自动清理半截临时文件。
+    pub async fn download(&self, url: &str, dir: &Path, name: &str) -> Download {
+        self.download_capped(url, dir, name, DOWNLOAD_MAX_BYTES).await
+    }
+
+    pub async fn download_capped(&self, url: &str, dir: &Path, name: &str, max_bytes: u64) -> Download {
+        tokio::time::timeout(Duration::from_secs(60), self.download_inner(url, dir, name, max_bytes))
+            .await
+            .unwrap_or(Download::Failed)
+    }
+
+    async fn download_inner(&self, url: &str, dir: &Path, name: &str, max_bytes: u64) -> Download {
+        use tokio::io::AsyncWriteExt;
+        let Ok(_permit) = self.dl_sem.acquire().await else { return Download::Failed };
+        let Ok(mut resp) = self.http.get(url).send().await else {
+            return Download::Failed;
+        };
         if !resp.status().is_success() {
-            return None;
+            return Download::Failed;
         }
-        let bytes = resp.bytes().await.ok()?;
-        tokio::fs::create_dir_all(dir).await.ok()?;
+        if let Some(len) = resp.content_length()
+            && len > max_bytes
+        {
+            return Download::TooLarge(len);
+        }
+        if tokio::fs::create_dir_all(dir).await.is_err() {
+            return Download::Failed;
+        }
         let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-        let safe: String = name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
-        let path = dir.join(format!("{ts}-{safe}"));
-        tokio::fs::write(&path, &bytes).await.ok()?;
-        Some(path)
+        let seq = DL_SEQ.fetch_add(1, Ordering::Relaxed);
+        let cleaned: Vec<char> = name.chars().map(|c| if c.is_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' }).collect();
+        let safe: String = cleaned[cleaned.len().saturating_sub(80)..].iter().collect();
+        let safe = if safe.is_empty() { "file" } else { safe.as_str() };
+        let path = dir.join(format!("{ts}-{seq}-{safe}"));
+        let part = dir.join(format!("{ts}-{seq}-{safe}.part"));
+        let mut guard = PartGuard(Some(part.clone()));
+        let mut file = match tokio::fs::File::create(&part).await {
+            Ok(f) => f,
+            Err(_) => return Download::Failed,
+        };
+        let mut written = 0u64;
+        loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    written = written.saturating_add(chunk.len() as u64);
+                    if written > max_bytes {
+                        drop(file);
+                        return Download::TooLarge(written);
+                    }
+                    if file.write_all(&chunk).await.is_err() {
+                        return Download::Failed;
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => return Download::Failed,
+            }
+        }
+        if file.flush().await.is_err() {
+            return Download::Failed;
+        }
+        drop(file);
+        if tokio::fs::rename(&part, &path).await.is_err() {
+            return Download::Failed;
+        }
+        guard.0 = None;
+        Download::Saved(path)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qya_core::Secret;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn types_and_errors() {
@@ -182,5 +266,36 @@ mod tests {
         assert_eq!(classify(400, "主动消息发送次数已达上限"), SendErrorKind::Forbidden);
         assert_eq!(classify(400, "content too long"), SendErrorKind::TooLong);
         assert_eq!(classify(502, ""), SendErrorKind::Transient);
+    }
+
+    #[tokio::test]
+    async fn download_streams_and_enforces_size_cap() {
+        let srv = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/ok.txt")).respond_with(ResponseTemplate::new(200).set_body_bytes(b"hello".to_vec())).mount(&srv).await;
+        Mock::given(method("GET")).and(path("/big.bin")).respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0u8; 256])).mount(&srv).await;
+
+        let dir = std::env::temp_dir().join(format!("qya-dl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let api = Api::new(QqConfig {
+            app_id: "A".into(),
+            secret: Secret::new("S"),
+            allowed_users: vec!["U".into()],
+            api_base: srv.uri(),
+            token_url: srv.uri(),
+            reply_window_min: 60,
+            max_replies: 5,
+            proactive_monthly_quota: 4,
+            inbox_dir: dir.clone(),
+        });
+
+        let ok = api.download_capped(&format!("{}/ok.txt", srv.uri()), &dir, "ok.txt", 100).await;
+        let Download::Saved(saved_path) = ok else { panic!("expected Saved, got {ok:?}") };
+        assert_eq!(std::fs::read(&saved_path).unwrap(), b"hello");
+
+        let big = api.download_capped(&format!("{}/big.bin", srv.uri()), &dir, "big.bin", 100).await;
+        assert_eq!(big, Download::TooLarge(256));
+        let files: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert_eq!(files.len(), 1, "超限下载不得在目录中残留半截文件");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

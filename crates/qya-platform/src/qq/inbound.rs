@@ -1,9 +1,11 @@
 //! 入站 C2C 消息解析：文本、图片与视频（落盘后以 file:// 引用，按目标模型能力在请求时内联或改为提示）、
 //! 语音（QQ 自带 asr_refer_text）、文件（落盘并在文字中说明）。
 
+pub use super::api::Download;
+use super::api::DOWNLOAD_MAX_BYTES;
 use qya_core::ContentPart;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// 一条入站消息中需要下载的附件。
 #[derive(Debug, Clone, PartialEq)]
@@ -59,22 +61,30 @@ pub fn parse_c2c(d: &Value) -> Option<Parsed> {
 }
 
 /// 把解析结果（附件已下载为本地路径）转成模型可读的内容片段。
-/// `saved[i]` 对应第 i 个附件的落盘路径（语音或下载失败为 None）。
-pub fn to_parts(p: &Parsed, saved: &[Option<PathBuf>]) -> Vec<ContentPart> {
+/// `saved[i]` 对应第 i 个附件的下载结果。
+pub fn to_parts(p: &Parsed, saved: &[Download]) -> Vec<ContentPart> {
     let mut notes = Vec::new();
     let mut media = Vec::new();
-    for (a, path) in p.attachments.iter().zip(saved) {
-        match (a, path) {
+    let mb = |b: u64| b as f64 / 1048576.0;
+    let cap_mb = DOWNLOAD_MAX_BYTES / 1048576;
+    for (a, dl) in p.attachments.iter().zip(saved) {
+        match (a, dl) {
             (Attachment::Voice { asr: Some(t) }, _) => notes.push(format!("〔语音转文字〕{t}")),
             (Attachment::Voice { asr: None }, _) => notes.push("〔阿颜发了一段语音，但没有拿到识别文字〕".to_owned()),
-            (Attachment::Image { .. }, Some(path)) => media.push(ContentPart::Image { url: file_url(path) }),
-            (Attachment::Image { .. }, None) => notes.push("〔一张图片下载失败〕".to_owned()),
-            (Attachment::Video { name, .. }, Some(path)) => {
+            (Attachment::Image { .. }, Download::Saved(path)) => media.push(ContentPart::Image { url: file_url(path) }),
+            (Attachment::Image { .. }, Download::TooLarge(b)) => {
+                notes.push(format!("〔一张图片（{:.1} MB）超过 {cap_mb} MB 下载上限，未保存〕", mb(*b)));
+            }
+            (Attachment::Image { .. }, Download::Failed) => notes.push("〔一张图片下载失败〕".to_owned()),
+            (Attachment::Video { name, .. }, Download::Saved(path)) => {
                 notes.push(format!("〔阿颜发来视频 {name}，已保存到 {}〕", path.display()));
                 media.push(ContentPart::Video { url: file_url(path) });
             }
-            (Attachment::File { name, .. }, Some(path)) => notes.push(format!("〔阿颜发来文件 {name}，已保存到 {}〕", path.display())),
-            (Attachment::Video { name, .. } | Attachment::File { name, .. }, None) => notes.push(format!("〔附件 {name} 下载失败〕")),
+            (Attachment::File { name, .. }, Download::Saved(path)) => notes.push(format!("〔阿颜发来文件 {name}，已保存到 {}〕", path.display())),
+            (Attachment::Video { name, .. } | Attachment::File { name, .. }, Download::TooLarge(b)) => {
+                notes.push(format!("〔附件 {name}（{:.1} MB）超过 {cap_mb} MB 下载上限，未保存〕", mb(*b)));
+            }
+            (Attachment::Video { name, .. } | Attachment::File { name, .. }, Download::Failed) => notes.push(format!("〔附件 {name} 下载失败〕")),
         }
     }
     let mut text = p.text.clone();
@@ -100,6 +110,7 @@ pub fn file_url(p: &Path) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
 
     fn sample() -> Value {
         json!({
@@ -129,11 +140,16 @@ mod tests {
     #[test]
     fn parts_for_model() {
         let p = parse_c2c(&sample()).unwrap();
-        let saved = vec![Some(PathBuf::from("/m/a.jpg")), None, Some(PathBuf::from("/m/b.mp4")), None];
+        let saved = vec![
+            Download::Saved(PathBuf::from("/m/a.jpg")),
+            Download::Failed,
+            Download::Saved(PathBuf::from("/m/b.mp4")),
+            Download::TooLarge(60 * 1024 * 1024),
+        ];
         let parts = to_parts(&p, &saved);
         let ContentPart::Text { text } = &parts[0] else { panic!() };
         assert!(text.starts_with("看看这个\n〔语音转文字〕晚上吃什么\n〔阿颜发来视频 猫.mp4"));
-        assert!(text.ends_with("〔附件 报告.pdf 下载失败〕"));
+        assert!(text.ends_with("〔附件 报告.pdf（60.0 MB）超过 50 MB 下载上限，未保存〕"));
         assert_eq!(parts[1], ContentPart::Image { url: "file:///m/a.jpg".into() });
         assert_eq!(parts[2], ContentPart::Video { url: "file:///m/b.mp4".into() });
     }

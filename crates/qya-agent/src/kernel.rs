@@ -262,8 +262,9 @@ impl Kernel {
         Ok(TurnOutcome { reason: outcome_reason, text: last_text, usage, media, unconsumed: unpersisted, inputs_saved, error })
     }
 
-    async fn context(&self, session: SessionId) -> Result<Vec<CtxMessage>> {
-        let branch = self.store.branch(session).await?;
+    /// 读取会话在最近一次压缩点之后的有效上下文。
+    pub async fn context(&self, session: SessionId) -> Result<Vec<CtxMessage>> {
+        let branch = self.store.context_branch(session).await?;
         Ok(context::build(&branch)?)
     }
 

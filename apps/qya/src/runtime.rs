@@ -369,6 +369,13 @@ impl Runtime {
             Some(Ok(cmd)) => {
                 let reply = self.command(cmd).await.unwrap_or_else(|e| card::warn(format!("命令失败：{e:#}")));
                 let _ = self.platform().send(Outbound::text(reply)).await;
+                let resume = {
+                    let st = self.state();
+                    st.phase == Phase::Idle && st.has_work()
+                };
+                if resume {
+                    self.arm_timer();
+                }
             }
             Some(Err(ParseError::BadArgs(n))) => {
                 let _ = self.platform().send(Outbound::text(format!("{}\n\n{}", card::warn("参数不对"), qya_command::help(Some(&n))))).await;
@@ -486,9 +493,49 @@ impl Runtime {
             c.item(format!("{} {n} 个", label(k, st)));
         }
         c.item(format!("记录 {} 条，数据库 {:.2} MB", stats.entries, stats.bytes as f64 / 1048576.0))
-            .hint(format!("每周自动清理结束超过 {} 天的会话", self.cfg.get().agent.gc_days))
-            .hint("手动清理：/gc 天数");
+            .hint("切换历史会话：/sessions 编号")
+            .hint(format!("清理历史会话：/gc [天数]（每周自动清理 >{} 天）", self.cfg.get().agent.gc_days));
         Ok(c.build())
+    }
+
+    /// 占住空闲态（临时置为 Delivering，析构时恢复 Idle），防止会话切换或手动压缩期间启动新轮次。
+    fn lock_idle(&self) -> Option<IdleLock<'_>> {
+        let mut st = self.state();
+        if st.phase != Phase::Idle || st.has_work() {
+            return None;
+        }
+        st.phase = Phase::Delivering;
+        Some(IdleLock(self))
+    }
+
+    async fn switch_session(&self, target: SessionId) -> Result<String> {
+        let Some(_idle) = self.lock_idle() else {
+            return Ok(card::warn("唐语歌正在回复中，请等这轮结束或先发 /stop"));
+        };
+        let old = self.session();
+        if target == old {
+            return Ok(card::warn(format!("当前已经在会话 #{target}")));
+        }
+        let c = self.cfg.get();
+        let default_s2 = self.kit().persona.snapshot(&c.persona.memory_dir);
+        let mut row = match self.store.switch_persona_session(old, target, default_s2).await {
+            Ok(r) => r,
+            Err(qya_store::StoreError::NotFound(_)) => {
+                return Ok(card::warn(format!("没有会话 #{target}，发 /sessions 查看可切换的编号")));
+            }
+            Err(qya_store::StoreError::Invalid(msg)) => return Ok(card::warn(msg)),
+            Err(e) => return Err(e.into()),
+        };
+        if model_info(&c, &row.model).is_err() {
+            row.model = c.persona.model.clone();
+            self.store.update_session(target, Some(row.model.clone()), None, None).await?;
+        }
+        self.state().session = target;
+        Ok(Card::new("✅", &format!("已切回会话 #{target}"))
+            .item(format!("{}｜思考 {}", row.model, row.effort))
+            .item(format!("旧会话 #{old} 已标为已结束"))
+            .hint("沿用该会话当时的记忆快照，需要最新记忆时发 /compact")
+            .build())
     }
 
     /// 媒体缓存清理：每小时删除媒体目录下超过 24 小时的文件（沿用 Hermes 的保留期）。
@@ -816,9 +863,14 @@ impl Runtime {
                 let id = self.new_persona_session().await?;
                 self.state().session = id;
                 self.store.update_session(old, None, None, Some(qya_store::SessionStatus::Closed)).await?;
-                format!("{}\n记忆和关系不变\n旧会话 #{old} 已结束，{} 天后可被清理", card::ok(format!("已开启新会话 #{id}")), c.agent.gc_days)
+                Card::new("✅", &format!("已开启新会话 #{id}"))
+                    .item("记忆和关系不变")
+                    .item(format!("旧会话 #{old} 已标为已结束（{} 天后可被清理）", c.agent.gc_days))
+                    .hint(format!("切回旧会话：/sessions {old}"))
+                    .build()
             }
-            Command::Sessions => self.sessions_report().await?,
+            Command::Sessions(None) => self.sessions_report().await?,
+            Command::Sessions(Some(id)) => self.switch_session(id).await?,
             Command::Gc(days) => self.gc(days.unwrap_or(c.agent.gc_days)).await?,
             Command::Stop => {
                 if self.stop_current() {
@@ -828,18 +880,20 @@ impl Runtime {
                 }
             }
             Command::Compact => {
-                if self.state().phase != Phase::Idle {
+                let Some(_idle) = self.lock_idle() else {
                     return Ok(card::warn("正在回复中，稍后再压缩"));
-                }
+                };
                 let s = self.store.session(self.session()).await?;
                 let mut spec = self.persona_spec(&c, &s, "").await?;
                 spec.tail = None;
-                let ctx = qya_agent::context::build(&self.store.branch(s.id).await?)?;
+                let ctx = self.kernel.context(s.id).await?;
                 let est = qya_agent::context::estimate_messages(&ctx);
-                if self.kernel.compact(&spec, s.id, &ctx, est, &CancellationToken::new()).await? {
-                    card::ok(format!("已压缩，压缩前约 {} token", tokens(est)))
+                let compacted = self.kernel.compact(&spec, s.id, &ctx, est, &CancellationToken::new()).await?;
+                self.refresh_snapshot(s.id).await?;
+                if compacted {
+                    card::ok(format!("已压缩并刷新记忆快照，压缩前约 {} token", tokens(est)))
                 } else {
-                    "💤 内容太少，无需压缩".into()
+                    card::ok("内容较少无需压缩历史，已刷新当前会话的记忆快照")
                 }
             }
             Command::Model(None) => {
@@ -859,9 +913,12 @@ impl Runtime {
             }
             Command::Effort(None) => {
                 let s = self.store.session(self.session()).await?;
+                let p = c.provider(&c.persona.provider).context("persona provider 未配置")?;
+                let cur = s.effort.parse::<Effort>().unwrap_or(Effort::Low);
                 Card::new("💭", "思考等级")
-                    .line(format!("当前 {}", s.effort))
-                    .line("可选 low / medium / high / xhigh / max")
+                    .line(format!("当前 {}（请求参数 {}）", s.effort, p.effort_param(cur)))
+                    .section("可选")
+                    .item("low / medium / high / xhigh / max")
                     .hint("切换：/effort 等级")
                     .build()
             }
@@ -869,7 +926,9 @@ impl Runtime {
                 let e: Effort = e.parse().map_err(anyhow::Error::msg)?;
                 self.store.update_session(self.session(), None, Some(e.to_string()), None).await?;
                 let p = c.provider(&c.persona.provider).context("persona provider 未配置")?;
-                format!("{}\n实际请求参数：{}", card::ok(format!("思考等级已切换为 {e}")), p.effort_param(e))
+                Card::new("✅", &format!("思考等级已切换为 {e}"))
+                    .item(format!("实际请求参数：{}", p.effort_param(e)))
+                    .build()
             }
             Command::Learn(cmd) => self.learn_command(cmd).await?,
             Command::Agents => qya_orchestra::render_list(&self.sup.list().await),
@@ -886,7 +945,7 @@ impl Runtime {
                 let c = self.cfg.reload()?;
                 let kit = PersonaKit::load(&c, &self.sup, &self.memory_lock)?;
                 *self.kit.lock().expect("kit 锁中毒") = Arc::new(kit);
-                format!("{}\n记忆快照在新会话或压缩后生效", card::ok("配置与人格资产已重新加载"))
+                Card::new("✅", "配置与人格资产已重新加载").hint("记忆快照在新会话或压缩后生效").build()
             }
         })
     }
@@ -914,7 +973,7 @@ impl Runtime {
         let c = self.cfg.get();
         let s = self.store.session(self.session()).await?;
         let info = model_info(&c, &s.model)?;
-        let ctx = qya_agent::context::build(&self.store.branch(s.id).await?)?;
+        let ctx = self.kernel.context(s.id).await?;
         let est = qya_agent::context::estimate_messages(&ctx);
         let workers = self.sup.running();
         let (phase, pending, last, total) = {
@@ -1014,6 +1073,17 @@ impl Runtime {
         }
         c.hint(format!("续接：/agent {id} 话"));
         Ok(c.build())
+    }
+}
+
+struct IdleLock<'a>(&'a Runtime);
+
+impl Drop for IdleLock<'_> {
+    fn drop(&mut self) {
+        let mut st = self.0.state();
+        if st.phase == Phase::Delivering {
+            st.phase = Phase::Idle;
+        }
     }
 }
 
@@ -1161,5 +1231,78 @@ mod tests {
         assert_eq!(super::gc_dir(&d, std::time::Duration::ZERO, &keep), 0, "仍被引用的文件保留");
         assert_eq!(super::gc_dir(&d, std::time::Duration::ZERO, &none), 1);
         assert!(!d.join("inbox/new.jpg").exists());
+    }
+
+    #[tokio::test]
+    async fn switches_persona_session_and_keeps_snapshot() {
+        let dir = std::env::temp_dir().join(format!("qya-rt-sw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_path = dir.join("k.key");
+        std::fs::write(&key_path, "test-key").unwrap();
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/persona");
+        let cfg_toml = format!(
+            r#"
+[paths]
+data_dir = '{}'
+[llm]
+default_provider = "p"
+[llm.providers.p]
+base_url = "http://127.0.0.1:9"
+key_file = '{}'
+transport = "chat_completions"
+[llm.providers.p.models.m]
+context_length = 8192
+[llm.providers.p.models."kimi-for-coding"]
+context_length = 8192
+[persona]
+provider = "p"
+model = "m"
+effort = "low"
+assets_dir = '{}'
+[orchestra]
+provider = "p"
+default_model = "m"
+default_effort = "low"
+worker_prompt = '{}'
+"#,
+            dir.display().to_string().replace('\\', "/"),
+            key_path.display().to_string().replace('\\', "/"),
+            assets.display().to_string().replace('\\', "/"),
+            assets.join("../agents/worker.md").display().to_string().replace('\\', "/"),
+        );
+        let cfg_path = dir.join("qya.toml");
+        std::fs::write(&cfg_path, cfg_toml).unwrap();
+        let rt = super::Runtime::open(qya_config::ConfigHandle::open(&cfg_path).unwrap()).await.unwrap();
+        let s1 = rt.session();
+        rt.store().kv_set(&super::kv_snapshot(s1), "S2_FIRST").await.unwrap();
+
+        // /new 开启新会话 s2，s1 变为 closed
+        let out_new = rt.command(qya_command::Command::New).await.unwrap();
+        let s2 = rt.session();
+        assert_ne!(s1, s2);
+        assert!(out_new.contains(&format!("已开启新会话 #{s2}")));
+        assert_eq!(rt.store().session(s1).await.unwrap().status, qya_store::SessionStatus::Closed);
+
+        // 非 Idle 时拒绝切换
+        rt.state().phase = super::Phase::Generating;
+        let busy = rt.command(qya_command::Command::Sessions(Some(s1))).await.unwrap();
+        assert!(busy.starts_with("⚠️"), "{busy}");
+        rt.state().phase = super::Phase::Idle;
+
+        // 后台任务会话不允许切换
+        let w = rt.store().create_session(qya_store::NewSession { kind: Some(qya_store::SessionKind::Worker), model: "m".into(), effort: "low".into(), ..Default::default() }).await.unwrap();
+        let bad = rt.command(qya_command::Command::Sessions(Some(w))).await.unwrap();
+        assert!(bad.contains("不是唐语歌的会话"), "{bad}");
+
+        // 切回 s1：s2 变为 closed，s1 恢复 active，沿用 s1 原快照
+        let sw = rt.command(qya_command::Command::Sessions(Some(s1))).await.unwrap();
+        assert!(sw.contains(&format!("已切回会话 #{s1}")), "{sw}");
+        assert_eq!(rt.session(), s1);
+        assert_eq!(rt.store().session(s1).await.unwrap().status, qya_store::SessionStatus::Active);
+        assert_eq!(rt.store().session(s2).await.unwrap().status, qya_store::SessionStatus::Closed);
+        assert_eq!(rt.snapshot(s1).await.unwrap(), "S2_FIRST");
+        assert_eq!(rt.store().kv_get(super::KV_PERSONA_SESSION).await.unwrap().as_deref(), Some(s1.to_string().as_str()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

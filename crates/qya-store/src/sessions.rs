@@ -251,6 +251,97 @@ impl Store {
         })
         .await
     }
+
+    /// 读取构建模型上下文所需的有效分支后缀：从叶子回溯到最近一次压缩条目的 `first_kept` 即停，
+    /// 避免在长寿命会话（如常驻专员）中每次都读取并反序列化早已被压缩覆盖的远古条目。
+    pub async fn context_branch(&self, session: SessionId) -> Result<Vec<Entry>> {
+        self.call(move |c| {
+            let leaf: Option<EntryId> = c
+                .query_row("SELECT leaf_id FROM sessions WHERE id=?1", [session], |r| r.get(0))
+                .optional()?
+                .ok_or_else(|| StoreError::NotFound(format!("会话 {session}")))?;
+            let Some(mut cur) = leaf else { return Ok(Vec::new()) };
+            let mut st = c.prepare_cached("SELECT id,session_id,parent_id,kind,payload,tokens,created_at FROM entries WHERE id=?1")?;
+            let mut out = Vec::new();
+            let mut stop_after: Option<EntryId> = None;
+            let mut seen_compaction = false;
+            loop {
+                let row = st
+                    .query_row([cur], |r| {
+                        Ok((
+                            r.get::<_, EntryId>(0)?,
+                            r.get::<_, SessionId>(1)?,
+                            r.get::<_, Option<EntryId>>(2)?,
+                            r.get::<_, String>(3)?,
+                            r.get::<_, String>(4)?,
+                            r.get::<_, i64>(5)?,
+                            r.get::<_, i64>(6)?,
+                        ))
+                    })
+                    .optional()?;
+                let Some((id, session_id, parent_id, kind_s, payload_s, tokens, created_at)) = row else { break };
+                let kind: EntryKind = kind_s.parse()?;
+                let payload: serde_json::Value = serde_json::from_str(&payload_s)?;
+                if kind == EntryKind::Compaction {
+                    if seen_compaction {
+                        break;
+                    }
+                    seen_compaction = true;
+                    match payload.get("first_kept").and_then(serde_json::Value::as_i64) {
+                        Some(fk) => stop_after = Some(fk),
+                        None => {
+                            out.push(Entry { id, session_id, parent_id, kind, payload, tokens, created_at });
+                            break;
+                        }
+                    }
+                }
+                out.push(Entry { id, session_id, parent_id, kind, payload, tokens, created_at });
+                if stop_after == Some(id) {
+                    break;
+                }
+                match parent_id {
+                    Some(p) => cur = p,
+                    None => break,
+                }
+            }
+            out.reverse();
+            Ok(out)
+        })
+        .await
+    }
+
+    /// 原子切换唐语歌的当前会话：在同一事务内校验目标会话存在且为 `persona`、将旧会话标为 `closed`、
+    /// 目标会话标为 `active`、确保目标会话具有冻结的记忆快照（已有则保留）、并更新 `persona_session`。
+    pub async fn switch_persona_session(&self, old: SessionId, target: SessionId, default_s2: String) -> Result<SessionRow> {
+        self.call(move |c| {
+            let tx = c.transaction()?;
+            let mut row = tx
+                .query_row(&format!("SELECT {SESSION_COLS} FROM sessions WHERE id=?1"), [target], session_from_row)
+                .optional()?
+                .ok_or_else(|| StoreError::NotFound(format!("会话 {target}")))?;
+            if row.kind != SessionKind::Persona {
+                return Err(StoreError::Invalid(format!("#{target} 不是唐语歌的会话，无法切换")));
+            }
+            let now = now_ms();
+            if old != target {
+                tx.execute("UPDATE sessions SET status='closed', updated_at=?2 WHERE id=?1", params![old, now])?;
+            }
+            tx.execute("UPDATE sessions SET status='active', updated_at=?2 WHERE id=?1", params![target, now])?;
+            tx.execute(
+                "INSERT INTO kv(key,value) VALUES(?1,?2) ON CONFLICT(key) DO NOTHING",
+                params![format!("persona_s2:{target}"), default_s2],
+            )?;
+            tx.execute(
+                "INSERT INTO kv(key,value) VALUES('persona_session',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [target.to_string()],
+            )?;
+            tx.commit()?;
+            row.status = SessionStatus::Active;
+            row.updated_at = now;
+            Ok(row)
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -351,5 +442,28 @@ mod tests {
         assert_eq!((row.model.as_str(), row.status), ("k3", SessionStatus::Archived));
         assert_eq!(s.list_sessions(SessionKind::Persona, Some(SessionStatus::Archived), 10).await.unwrap().len(), 1);
         assert!(s.list_sessions(SessionKind::Persona, Some(SessionStatus::Active), 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn context_branch_stops_at_compaction_anchor() {
+        let s = Store::in_memory().unwrap();
+        let p = s.create_session(new("m")).await.unwrap();
+        let _e1 = s.append(p, EntryKind::Message, json!({"n": 1}), 1).await.unwrap();
+        let _e2 = s.append(p, EntryKind::Message, json!({"n": 2}), 1).await.unwrap();
+        let e3 = s.append(p, EntryKind::Message, json!({"n": 3}), 1).await.unwrap();
+        let e4 = s.append(p, EntryKind::Message, json!({"n": 4}), 1).await.unwrap();
+        let c1 = s.append(p, EntryKind::Compaction, json!({"summary": "S1", "first_kept": e3, "tokens_before": 10}), 0).await.unwrap();
+        let e5 = s.append(p, EntryKind::Message, json!({"n": 5}), 1).await.unwrap();
+
+        // 完整分支有 6 条，而 context_branch 应在 e3 停下，只读 [e3, e4, c1, e5] 共 4 条
+        assert_eq!(s.branch(p).await.unwrap().len(), 6);
+        let ids: Vec<_> = s.context_branch(p).await.unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![e3, e4, c1, e5]);
+
+        // 再次压缩且 first_kept 为 null 时，直接在最新 compaction 停下
+        let c2 = s.append(p, EntryKind::Compaction, json!({"summary": "S2", "first_kept": null, "tokens_before": 20}), 0).await.unwrap();
+        let e6 = s.append(p, EntryKind::Message, json!({"n": 6}), 1).await.unwrap();
+        let ids2: Vec<_> = s.context_branch(p).await.unwrap().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids2, vec![c2, e6]);
     }
 }

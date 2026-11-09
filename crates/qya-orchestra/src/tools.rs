@@ -140,7 +140,7 @@ pub fn render_list(list: &[crate::WorkerInfo]) -> String {
             c.item(format!("进度：{p}"));
         }
     }
-    c.build()
+    c.hint("查看或操作：/agent 编号 [stop|话]").build()
 }
 
 #[async_trait]

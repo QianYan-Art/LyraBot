@@ -18,7 +18,7 @@
 | `skill_view` | 按需读取 SKILL.md |
 | `recall` | 检索唐语歌与阿颜的过往对话 |
 
-- `shell`：执行前调用 `rtk rewrite <cmd>`（2 s 超时，退出码 0/3 且有输出才采用；RTK 1.2.0 起 1 为不改写、2 为拒绝）。输出超过 `output_limit`（默认 8000 字）时，完整内容存到 `<media_dir>/tool-output/`（随媒体清理回收），返回首 40% 尾 60% 与“共多少行、存在哪里、用 fs_search / fs_read 细看”的说明；stdout/stderr 与等待并发读取，每路最多保留 4 MB，超出时如实标注截断。Unix 以 `setsid` 启动，超时、取消或调用被丢弃时 `kill -KILL -<pgid>` 清理整个进程组。硬禁止：对 `/`、`/etc`、`/usr`、`/var/lib/qya` 的递归删除，`mkfs`、`dd of=/dev/*`、关机重启；其余不审批（单用户设计）。每次调用（含被拒绝的）写入审计 JSONL `/var/log/qya/audit.jsonl`。Windows 开发机需把 shell 指向 Git Bash，否则会解析到 WSL 的 bash.exe。
+- `shell`：执行前调用 `rtk rewrite <cmd>`（2 s 超时，退出码 0/3 且有输出才采用；RTK 1.2.0 起 1 为不改写、2 为拒绝）。输出超过 `output_limit`（默认 8000 字）时，完整内容存到 `<media_dir>/tool-output/`（随媒体清理回收），返回首 40% 尾 60% 与“共多少行、存在哪里、用 fs_search / fs_read 细看”的说明；stdout/stderr 与等待并发读取，每路最多保留 4 MB，超出时如实标注截断。Unix 以 `setsid` 启动，超时、取消或调用被丢弃时 `kill -KILL -<pgid>` 清理整个进程组。硬禁止：对 `/`、`/etc`、`/usr`、`/var/lib/qya` 的递归删除，`mkfs`、`dd of=/dev/*`、关机重启；其余不审批（单用户设计）。每次调用（含被拒绝的）写入审计 JSONL `/var/log/qya/audit.jsonl`（达到 5 MB 自动轮转为 `.1`，保留当前与 1 份历史共约 10 MB，由互斥锁保证并发安全）。Windows 开发机需把 shell 指向 Git Bash，否则会解析到 WSL 的 bash.exe。
 - `memory`：按角色构造实例——唐语歌可写 `user`/`memory`，专员只可写自己的记忆文件（经编排的 extras 钩子注入）；与记忆整理共用写锁（见 `04-persona-memory.md` 第 3 节）。
 - `cron`：5 段表达式按北京时间（croner + jiff）；运行时每 30 s 检查到期任务，停机期间错过的只补一次；`remind` 以〔定时提醒〕消息交给唐语歌，`task` 派给指定执行者/专员并按 relay 交回；恢复暂停的任务以当前时间为基准，不补发。动作带 `once: true` 的一次性任务（“明天 9 点”“11 月 10 日”这类具体某天的事）触发前即删除，不会第二年再响（2026-11-09 验收时发现并修复）。没有单独的聊天命令。
 - `skill_view`：扫描 `skills/*/SKILL.md` frontmatter，技能清单写在工具说明里；当前技能 grill-me（迁移）、qya-docs（定位本项目文档，同时列服务器路径与仓库路径，部署时文档同步到 `/opt/qya/docs/`）。mail-vps-ops、grok-search、tangyuge-roleplay 已分别由 mail 工具、grok 插件、persona_notes 取代。

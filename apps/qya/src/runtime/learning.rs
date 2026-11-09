@@ -148,7 +148,9 @@ impl Runtime {
         let (added, reinforced, removed) = self.store.learn_expressions(learned.expressions, lc.max_items).await?;
         let notes = learned.memories.into_iter().map(|m| (m.target, m.text, m.basis)).collect();
         let queued = self.store.add_memory_candidates(notes).await?;
-        self.store.kv_set(&kv_learn_ckpt(session), &last.to_string()).await?;
+        if self.store.session(session).await.is_ok() {
+            self.store.kv_set(&kv_learn_ckpt(session), &last.to_string()).await?;
+        }
         self.rebuild_index().await?;
         Ok(format!(
             "学习了 {} 条新消息：说法提取 {n} 条（新增 {added}，强化 {reinforced}，淘汰 {removed}），记忆候选 {queued} 条",
@@ -241,25 +243,42 @@ impl Runtime {
                         c.line("（空）");
                     }
                     for (i, e) in list.iter().enumerate() {
-                        c.line(format!("{prefix}{} {e}", i + 1));
+                        c.item(format!("{prefix}{} {e}", i + 1));
                     }
                 }
-                c.hint("删除：/learn forget u3 或 m2").hint("改动在新会话生效").build()
+                c.hint("删除：/learn forget u3 或 m2").hint("改动在新会话或压缩后生效").build()
             }
             LearnCmd::Forget(id) => self.forget(&id).await?,
             LearnCmd::On => {
                 self.store.kv_set(KV_LEARN_ENABLED, "on").await?;
                 if self.cfg.get().persona.learner.enabled {
-                    card::ok("学习已开启（说法与记忆）")
+                    card::ok("自动学习已开启（说法与记忆）")
                 } else {
                     card::warn("已记录开启，但配置 persona.learner.enabled=false，仍不会自动学习")
                 }
             }
             LearnCmd::Off => {
                 self.store.kv_set(KV_LEARN_ENABLED, "off").await?;
-                format!("{}\n已有的说法与记忆不受影响", card::ok("学习已暂停（不再学习说法、不再整理记忆）"))
+                Card::new("✅", "自动学习已暂停")
+                    .item("不再自动学习说法与整理记忆")
+                    .item("已有的说法与记忆不受影响")
+                    .hint("恢复开启：/learn on")
+                    .build()
             }
-            LearnCmd::Now => format!("🌱 {}", self.learn_once(true).await?.unwrap_or_default()),
+            LearnCmd::Now => {
+                let msg = self.learn_once(true).await?.unwrap_or_default();
+                let mut lines = msg.lines();
+                match (lines.next(), lines.next()) {
+                    (Some(first), None) => format!("🌱 {first}"),
+                    _ => {
+                        let mut c = Card::new("🌱", "学习与整理");
+                        for line in msg.lines() {
+                            c.item(line);
+                        }
+                        c.build()
+                    }
+                }
+            }
             LearnCmd::Undo => self.undo_consolidation().await?,
         })
     }
@@ -314,7 +333,10 @@ impl Runtime {
         }
         let old = list.remove(i);
         self.write_memory(name, &list)?;
-        Ok(format!("{}\n{old}\n新会话生效", card::ok(format!("已删除 {id}"))))
+        Ok(Card::new("✅", &format!("已删除记忆 {id}"))
+            .item(old)
+            .hint("改动在新会话或压缩后生效")
+            .build())
     }
 
     /// 撤销最近一次整理：只有记忆文件仍是那次整理的结果时才恢复，避免覆盖之后的手动修改。
@@ -334,7 +356,10 @@ impl Runtime {
         }
         self.store.delete_memory_revision(rev.id).await?;
         let changes: Vec<String> = rev.summary.lines().map(str::to_owned).collect();
-        Ok(format!("{}\n新会话生效", card::ok(format!("已撤销 {} 的整理（{}）", when(rev.created_at), tally(&changes)))))
+        Ok(Card::new("✅", &format!("已撤销 {} 的整理", when(rev.created_at)))
+            .item(tally(&changes))
+            .hint("改动在新会话或压缩后生效")
+            .build())
     }
 }
 

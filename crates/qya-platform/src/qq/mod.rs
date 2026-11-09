@@ -19,7 +19,6 @@ use qya_store::Store;
 use reply::ReplyState;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -245,12 +244,12 @@ impl QqPlatform {
         let api = self.api.clone();
         tokio::spawn(async move {
             let dir = api.cfg().inbox_dir.clone();
-            let mut saved: Vec<Option<PathBuf>> = Vec::new();
+            let mut saved: Vec<inbound::Download> = Vec::new();
             for a in &p.attachments {
                 saved.push(match a {
                     inbound::Attachment::Image { url, ext } => api.download(url, &dir, &format!("image.{ext}")).await,
                     inbound::Attachment::Video { url, name } | inbound::Attachment::File { url, name } => api.download(url, &dir, name).await,
-                    inbound::Attachment::Voice { .. } => None,
+                    inbound::Attachment::Voice { .. } => inbound::Download::Failed,
                 });
             }
             let parts = inbound::to_parts(&p, &saved);

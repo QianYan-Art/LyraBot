@@ -39,24 +39,46 @@ pub fn tail_chars(s: &str, limit: usize) -> String {
     if n <= limit { s.to_owned() } else { format!("…{}", s.chars().skip(n - limit).collect::<String>()) }
 }
 
-/// 工具调用审计（JSON Lines，追加写；失败只记日志不影响工具）。
+/// 审计日志单文件大小上限（5 MB）；达到后轮转为 `.1`，最多保留当前与 1 份历史（总计封顶约 10 MB）。
+pub const AUDIT_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
+
+/// 工具调用审计（JSON Lines，追加写；达上限自动轮转；共享互斥锁保证并发安全；失败只记日志不影响工具）。
 #[derive(Debug, Clone)]
 pub struct Audit {
     path: PathBuf,
+    max_bytes: u64,
+    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Audit {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self { path, max_bytes: AUDIT_ROTATE_BYTES, lock: std::sync::Arc::new(tokio::sync::Mutex::new(())) }
+    }
+
+    pub fn with_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.max_bytes = max_bytes;
+        self
     }
 
     pub async fn record(&self, entry: Value) {
         use tokio::io::AsyncWriteExt;
         let mut line = entry.to_string();
         line.push('\n');
+        let _guard = self.lock.lock().await;
         let res = async {
             if let Some(dir) = self.path.parent() {
                 tokio::fs::create_dir_all(dir).await?;
+            }
+            if self.max_bytes > 0
+                && let Ok(meta) = tokio::fs::metadata(&self.path).await
+                && meta.len() > 0
+                && meta.len().saturating_add(line.len() as u64) > self.max_bytes
+            {
+                let mut bak = self.path.as_os_str().to_owned();
+                bak.push(".1");
+                if let Err(e) = tokio::fs::rename(&self.path, PathBuf::from(bak)).await {
+                    tracing::warn!(error = %e, path = %self.path.display(), "轮转审计日志失败");
+                }
             }
             let mut f = tokio::fs::OpenOptions::new().create(true).append(true).open(&self.path).await?;
             f.write_all(line.as_bytes()).await?;
@@ -218,5 +240,21 @@ mod tests {
         let t = truncate_middle(&"x".repeat(100), 10);
         assert!(t.starts_with("xxxx\n…（省略 90 字）…\nxxxxxx"));
         assert_eq!(tail_chars("abcdef", 3), "…def");
+    }
+
+    #[tokio::test]
+    async fn audit_rotates_at_size_limit() {
+        let dir = std::env::temp_dir().join(format!("qya-audit-rot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("audit.jsonl");
+        let bak = dir.join("audit.jsonl.1");
+        let audit = Audit::new(path.clone()).with_max_bytes(40);
+        audit.record(serde_json::json!({"seq": 1, "padding": "aaaaaaaaaaaa"})).await;
+        assert!(path.exists() && !bak.exists());
+        audit.record(serde_json::json!({"seq": 2, "padding": "bbbbbbbbbbbb"})).await;
+        assert!(bak.exists(), "超过上限后旧文件应轮转为 .1");
+        assert!(std::fs::read_to_string(&bak).unwrap().contains("\"seq\":1"));
+        assert!(std::fs::read_to_string(&path).unwrap().contains("\"seq\":2"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
