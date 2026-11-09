@@ -39,10 +39,10 @@
 | `/model [名称]` | 查看/切换唐语歌模型（须在模型目录中） |
 | `/effort [等级]` | 查看/切换唐语歌思考等级 |
 | `/learn` | 学习与记忆总览；`list 说法` / `list 记忆`（必须写明，不带对象视为参数错误）、`forget 编号\|u3\|m2`、`now`、`undo`、`on\|off` |
-| `/agents` | 列出后台任务与专员：编号、状态、模型、耗时、进度 |
+| `/agent [list]` | 列出后台任务与专员：编号、状态、模型、耗时、进度 |
 | `/agent <id> [消息]` | 查看某个任务详情；带消息则续接/插话 |
 | `/agent <id> stop` | 停止某个任务 |
-| `/provider` | 列出生图/语音/搜索/grok 当前提供方与字段 |
+| `/provider` | 列出生图/语音/搜索（含 grok）当前提供方与字段 |
 | `/provider <类别> <字段> <值>` | 例：`/provider image model gpt-image-2.5-flare`；`use` 切换提供方；写回配置并热生效 |
 | `/reload` | 重新加载配置、secret 文件与人格资产 |
 

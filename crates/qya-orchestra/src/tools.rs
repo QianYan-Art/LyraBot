@@ -120,7 +120,7 @@ impl AgentCtlTool {
     }
 }
 
-/// /agents 与 agent_ctl(status) 共用的列表渲染。
+/// /agent 与 agent_ctl(status) 共用的列表渲染。
 pub fn render_list(list: &[crate::WorkerInfo]) -> String {
     if list.is_empty() {
         return "🤖 目前没有后台任务".into();

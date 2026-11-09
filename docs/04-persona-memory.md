@@ -33,7 +33,7 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料（persona
 - 唐语歌不会主动开口：答应“到时候提醒你”这类有时间的事，当场用 cron 设好并告诉阿颜（具体某天的用一次性提醒），时间未定先问清楚。
 - 渲染卫生由 `crates/qya-persona/tests/persona.rs` 断言（首块为身份、段落顺序、无 Hermes/UI/占位符残留、重复渲染字节一致）。
 
-### 1.1 自定义角色卡、称呼与按需资料（开发者与部署 Agent 指南）
+### 1.1 自定义角色卡、称呼与按需资料
 
 代码不硬编码角色名与用户称呼：运行时统一从 `Persona::name()`（取自 `card.json` 的 `name`）和 `Persona::user_name()`（取自 `persona.toml` 的 `user_name`）读取，并在渲染 S1、按需资料（`notes`）、学习与记忆整理提示词时自动将 `{{char}}` 与 `{{user}}` 替换为对应名称。
 

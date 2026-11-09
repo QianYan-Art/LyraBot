@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use qya_agent::{Kernel, KernelConfig, Queues, Tool, ToolRegistry, TurnOutcome, TurnSpec};
-use qya_command::{AgentAction, Command, LearnCmd, ParseError};
+use qya_command::{AgentAction, AgentCmd, Command, LearnCmd, ParseError};
 use qya_config::{Config, ConfigHandle, ModelInfo};
 use qya_core::card::{self, Card};
 use qya_core::{AgentEvent, Effort, Message, Role, SessionId, StopReason, Usage};
@@ -942,12 +942,12 @@ impl Runtime {
                     .build()
             }
             Command::Learn(cmd) => self.learn_command(cmd).await?,
-            Command::Agents => qya_orchestra::render_list(&self.sup.list().await),
             Command::Provider(None) => qya_plugins::provider_cmd::list(&self.cfg),
             Command::Provider(Some((cat, field, value))) => {
                 qya_plugins::provider_cmd::apply(&self.cfg, &cat, &field, &value).map_or_else(card::warn, card::ok)
             }
-            Command::Agent { id, action } => match action {
+            Command::Agent(AgentCmd::List) => qya_orchestra::render_list(&self.sup.list().await),
+            Command::Agent(AgentCmd::Task { id, action }) => match action {
                 AgentAction::Show => self.agent_detail(id).await?,
                 AgentAction::Stop => self.sup.stop(id).map_or_else(card::warn, card::ok),
                 AgentAction::Say(t) => self.sup.continue_worker(id, &t, self.session()).await.map_or_else(card::warn, card::ok),
@@ -1062,7 +1062,7 @@ impl Runtime {
     /// /agent <id>：基本信息 + 该执行者最近一条回复。
     async fn agent_detail(&self, id: SessionId) -> Result<String> {
         let Ok(row) = self.store.session(id).await else {
-            return Ok(card::warn(format!("没有后台任务 #{id}，发 /agents 查看列表")));
+            return Ok(card::warn(format!("没有后台任务 #{id}，发 /agent list 查看列表")));
         };
         if row.kind == SessionKind::Persona {
             return Ok(card::warn(format!("#{id} 是{}的会话，不是后台任务", self.kit().persona.name())));

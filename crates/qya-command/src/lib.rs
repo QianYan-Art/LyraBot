@@ -14,8 +14,7 @@ pub enum Command {
     Model(Option<String>),
     Effort(Option<Effort>),
     Learn(LearnCmd),
-    Agents,
-    Agent { id: i64, action: AgentAction },
+    Agent(AgentCmd),
     /// None：查看会话与数据库；Some(id)：切回唐语歌的历史会话 #id
     Sessions(Option<i64>),
     /// 清理早于 N 天的历史会话（缺省用配置 gc_days）
@@ -23,6 +22,14 @@ pub enum Command {
     /// None：列出；Some((类别, 字段, 值))：修改；字段为 use 时切换提供方
     Provider(Option<(String, String, String)>),
     Reload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentCmd {
+    /// 列出后台任务与常驻专员
+    List,
+    /// 查看、停止或续接单个后台任务
+    Task { id: i64, action: AgentAction },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,24 +146,17 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         group: "模型与扩展",
-        name: "agents",
-        usage: "/agents",
-        summary: "后台任务列表",
-        detail: "列出后台任务与常驻专员：编号、状态、模型、耗时、进度。",
-    },
-    CommandSpec {
-        group: "模型与扩展",
         name: "agent",
-        usage: "/agent <编号> [stop|话]",
-        summary: "查看、停止或续接",
-        detail: "管理单个后台任务或常驻专员。\n/agent 12 查看详情与最近回复\n/agent 12 stop 停止运行中的任务\n/agent 12 再查一下日志（运行中则插话，已结束则续接）",
+        usage: "/agent [list | <编号> [stop|话]]",
+        summary: "查看或管理后台任务",
+        detail: "查看后台任务与常驻专员列表，或操作单个任务。\n/agent 或 /agent list 列出后台任务与常驻专员（编号、状态、模型、耗时、进度）\n/agent 12 查看 #12 的详情与最近回复\n/agent 12 stop 停止运行中的任务\n/agent 12 再查一下日志（运行中则插话，已结束则续接）",
     },
     CommandSpec {
         group: "模型与扩展",
         name: "provider",
         usage: "/provider [类别 字段 值]",
-        summary: "生图、语音、搜索、grok",
-        detail: "查看或热修改可插拔提供方配置。\n/provider 查看当前提供方\n/provider image model gpt-image-2 修改字段\n/provider image use 名字 切换激活提供方",
+        summary: "生图、语音、搜索",
+        detail: "查看或热修改生图、语音、搜索（含 grok）提供方配置。\n/provider 查看当前提供方\n/provider image model gpt-image-2 修改字段\n/provider image use 名字 切换激活提供方",
     },
     CommandSpec {
         group: "模型与扩展",
@@ -199,7 +199,6 @@ pub fn parse(input: &str) -> Option<Result<Command, ParseError>> {
             Some(a) => a.parse::<Effort>().map(|e| Command::Effort(Some(e))).map_err(|_| ParseError::BadArgs("effort".into())),
         },
         "learn" => parse_learn(arg.as_deref()).map(Command::Learn).ok_or_else(|| ParseError::BadArgs("learn".into())),
-        "agents" => no_arg(Command::Agents, "agents"),
         "sessions" => match arg.as_deref() {
             None => Ok(Command::Sessions(None)),
             Some(a) => match a.trim_start_matches('#').parse::<i64>() {
@@ -212,7 +211,7 @@ pub fn parse(input: &str) -> Option<Result<Command, ParseError>> {
             Some(Ok(d)) => Ok(Command::Gc(Some(d))),
             Some(Err(_)) => Err(ParseError::BadArgs("gc".into())),
         },
-        "agent" => parse_agent(arg.as_deref()).ok_or_else(|| ParseError::BadArgs("agent".into())),
+        "agent" => parse_agent(arg.as_deref()).map(Command::Agent).ok_or_else(|| ParseError::BadArgs("agent".into())),
         "provider" => match arg.as_deref() {
             None => Ok(Command::Provider(None)),
             Some(a) => parse_provider(a).ok_or_else(|| ParseError::BadArgs("provider".into())),
@@ -229,8 +228,14 @@ fn parse_provider(arg: &str) -> Option<Command> {
     (!cat.is_empty() && !field.is_empty() && !val.is_empty()).then(|| Command::Provider(Some((cat.to_owned(), field.to_owned(), val.to_owned()))))
 }
 
-fn parse_agent(arg: Option<&str>) -> Option<Command> {
-    let arg = arg?.trim().trim_start_matches('#');
+fn parse_agent(arg: Option<&str>) -> Option<AgentCmd> {
+    let Some(arg) = arg.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Some(AgentCmd::List);
+    };
+    if arg.eq_ignore_ascii_case("list") {
+        return Some(AgentCmd::List);
+    }
+    let arg = arg.trim_start_matches('#');
     let (id, rest) = arg.split_once(char::is_whitespace).unwrap_or((arg, ""));
     let id: i64 = id.parse().ok().filter(|&id| id > 0)?;
     let rest = rest.trim();
@@ -241,7 +246,7 @@ fn parse_agent(arg: Option<&str>) -> Option<Command> {
     } else {
         AgentAction::Say(rest.to_owned())
     };
-    Some(Command::Agent { id, action })
+    Some(AgentCmd::Task { id, action })
 }
 
 fn parse_learn(arg: Option<&str>) -> Option<LearnCmd> {
@@ -336,12 +341,15 @@ mod tests {
         assert_eq!(parse("/sessions #7"), Some(Ok(Command::Sessions(Some(7)))));
         assert_eq!(parse("/sessions 0"), Some(Err(ParseError::BadArgs("sessions".into()))));
         assert_eq!(parse("/sessions abc"), Some(Err(ParseError::BadArgs("sessions".into()))));
-        assert_eq!(parse("/agent #7 stop"), Some(Ok(Command::Agent { id: 7, action: AgentAction::Stop })));
-        assert_eq!(parse("/agent 7 STOP"), Some(Ok(Command::Agent { id: 7, action: AgentAction::Stop })));
-        assert_eq!(parse("/agent 7 再查一下日志"), Some(Ok(Command::Agent { id: 7, action: AgentAction::Say("再查一下日志".into()) })));
-        assert_eq!(parse("/agent 7"), Some(Ok(Command::Agent { id: 7, action: AgentAction::Show })));
+        assert_eq!(parse("/agent"), Some(Ok(Command::Agent(AgentCmd::List))));
+        assert_eq!(parse("/agent list"), Some(Ok(Command::Agent(AgentCmd::List))));
+        assert_eq!(parse("/agent LIST"), Some(Ok(Command::Agent(AgentCmd::List))));
+        assert_eq!(parse("/agent list extra"), Some(Err(ParseError::BadArgs("agent".into()))));
+        assert_eq!(parse("/agent #7 stop"), Some(Ok(Command::Agent(AgentCmd::Task { id: 7, action: AgentAction::Stop }))));
+        assert_eq!(parse("/agent 7 STOP"), Some(Ok(Command::Agent(AgentCmd::Task { id: 7, action: AgentAction::Stop }))));
+        assert_eq!(parse("/agent 7 再查一下日志"), Some(Ok(Command::Agent(AgentCmd::Task { id: 7, action: AgentAction::Say("再查一下日志".into()) }))));
+        assert_eq!(parse("/agent 7"), Some(Ok(Command::Agent(AgentCmd::Task { id: 7, action: AgentAction::Show }))));
         assert_eq!(parse("/agent 0"), Some(Err(ParseError::BadArgs("agent".into()))));
-        assert_eq!(parse("/agent"), Some(Err(ParseError::BadArgs("agent".into()))));
         assert_eq!(parse("/provider image model gpt-image-2"), Some(Ok(Command::Provider(Some(("image".into(), "model".into(), "gpt-image-2".into()))))));
         assert_eq!(parse("/provider  image   model   gpt-image-2 "), Some(Ok(Command::Provider(Some(("image".into(), "model".into(), "gpt-image-2".into()))))));
         assert_eq!(parse("/provider"), Some(Ok(Command::Provider(None))));

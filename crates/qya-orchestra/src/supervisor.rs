@@ -143,7 +143,7 @@ impl WorkerReport {
     }
 }
 
-/// /agents 与 agent_ctl 展示用的快照。
+/// /agent 与 agent_ctl 展示用的快照。
 #[derive(Debug, Clone)]
 pub struct WorkerInfo {
     pub id: SessionId,

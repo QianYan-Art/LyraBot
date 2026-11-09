@@ -87,7 +87,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-## 自定义角色与称呼（面向开发者与部署 Agent）
+## 自定义角色与称呼
 
 仓库默认自带作者自用的角色“唐语歌”与称呼“阿颜”作为完整生产示例。角色名与用户称呼已从代码中解耦，替换成你自己的角色**不需要修改 Rust 代码**，只需调整 `assets/persona/` 目录：
 
@@ -114,8 +114,8 @@ cargo test --workspace
 | `/new` · `/stop` · `/compact` | 新会话 · 停止当前回复 · 压缩会话并刷新记忆快照 |
 | `/sessions [编号]` · `/gc [天数]` | 查看会话与数据库或切回历史会话 · 清理历史会话（默认 30 天，另有每周自动清理） |
 | `/model [名]` · `/effort [等级]` | 切换唐语歌的模型与思考等级 |
-| `/agents` · `/agent <编号> [stop/话]` | 查看、停止、续接后台任务 |
-| `/provider [类别 字段 值]` | 查看或修改生图、语音、搜索、grok 提供方 |
+| `/agent [list · <编号> [stop/话]]` | 查看后台任务列表，或查看详情、停止、续接任务 |
+| `/provider [类别 字段 值]` | 查看或修改生图、语音、搜索（含 grok）提供方 |
 | `/learn [list 说法/记忆 · forget · now · undo · on/off]` | 学习与记忆：总览、查看说法或记忆、删除、立即整理、撤销 |
 | `/reload` | 重载配置与人格资产 |
 
