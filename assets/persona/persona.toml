@@ -10,7 +10,7 @@ core = [
   { title = "表达与事实边界", file = "core/limits.md" },
 ]
 
-# S1 的运行时段落（qya 部署专属）
+# S1 的运行时段落（LyraBot 部署专属）
 runtime_relationship = "runtime/relationship.md"
 runtime_agency = "runtime/agency.md"
 

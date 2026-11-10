@@ -1,6 +1,6 @@
-# qy-assistant 架构总览
+# LyraBot 架构总览
 
-记录日期：2026-11-07（2026-11-09 拆分整理）
+记录日期：2026-11-07（2026-11-09 拆分整理，2026-11-10 命名统一为 LyraBot）
 上游：`docs/00-PRD.md`；决策依据：`docs/02-decisions.md`。
 本文只讲总体结构、技术栈与代码布局；各模块细节见下方文档索引。文档与代码或运行结果冲突时，以代码和运行结果为准。
 
@@ -12,7 +12,7 @@
 | `01-architecture.md` | 本文：总体结构、技术栈、Workspace 布局 |
 | `02-decisions.md` | 关键决策与备选方案 |
 | `03-model-kernel.md` | 模型层（kimi-code 适配、可靠性）与内核（循环、工具接口、会话树与压缩） |
-| `04-persona-memory.md` | 唐语歌的提示词布局、回复节奏、说法学习与记忆整理 |
+| `04-persona-memory.md` | 主对话角色的提示词布局、回复节奏、说法学习与记忆整理 |
 | `05-orchestra.md` | 多代理编排：派活、上下文继承、专员、先存后投与重启恢复 |
 | `06-tools-plugins.md` | 内置工具、可插拔提供方、视频代看、抖音外部服务 |
 | `07-platform-commands.md` | 平台层（QQ 官方、CLI、OneBot 预留）与聊天命令 |
@@ -23,24 +23,24 @@
 ## 2. 总体结构
 
 ```
-               ┌──────────────── qya 进程（tokio，单二进制） ────────────────┐
+                ┌────────────── lyrabot 进程（tokio，单二进制） ───────────────┐
 QQ 官方 WS ──▶ │ platform::qq ─┐                                             │
 本地 CLI   ──▶ │ platform::cli ┼─▶ Inbox ─▶ persona::Pacer ─▶ PersonaAgent ──┼─▶ 平台发送 / 发件箱
-               │               │   (合并连发/打断)       │ 轻工具         ▲    │
-               │ command（/命令直达，不经模型）            │ delegate()     │    │
-               │                                          ▼                │    │
-               │                         orchestra::Supervisor ──汇报信箱──┘    │
-               │                           ├ Worker(任务型, 可续接)             │
-               │                           └ Specialist(常驻专员)              │
-               │ agent::Kernel（pi 式循环）  llm::Provider(kimi-code)          │
-               │ tools::*  plugins::{image,tts,search,grok,video}  douyin      │
-               │ store(SQLite WAL)  cron 调度  learner(说法/记忆)            │
-               └──────────────────────────────────────────────────────────────┘
+                │               │   (合并连发/打断)       │ 轻工具         ▲    │
+                │ command（/命令直达，不经模型）            │ delegate()     │    │
+                │                                          ▼                │    │
+                │                         orchestra::Supervisor ──汇报信箱──┘    │
+                │                           ├ Worker(任务型, 可续接)             │
+                │                           └ Specialist(常驻专员)              │
+                │ agent::Kernel（pi 式循环）  llm::Provider(kimi-code)          │
+                │ tools::*  plugins::{image,tts,search,grok,video}  douyin      │
+                │ store(SQLite WAL)  cron 调度  learner(说法/记忆)            │
+                └──────────────────────────────────────────────────────────────┘
 ```
 
 设计原则：
 
-- 内核与人格分离：`agent::Kernel` 不知道唐语歌，只跑"提示词 + 消息 + 工具 → 事件流"。人格、拟人、编排都是内核之上的层。
+- 内核与人格分离：`agent::Kernel` 不绑定具体角色，只跑"提示词 + 消息 + 工具 → 事件流"。人格、拟人、编排都是内核之上的层。
 - 扩展点是 trait + 注册表：`Platform`、`Provider`、`Tool`、可插拔提供方（按 `kind` 选择实现）。
 - 单写者存储：所有 SQLite 读写经一个专用线程串行执行，避免锁竞争。
 - 配置热更新：`ArcSwap<Config>`，读零锁；`/provider` 写回 TOML（`toml_edit` 保留注释）并原子替换，`/reload` 重载配置与人格资产。
@@ -71,28 +71,28 @@ Release profile：`opt-level=3, lto="fat", codegen-units=1, strip=true, panic="u
 ## 4. Workspace 布局
 
 ```
-qy_assistant/
-├─ Cargo.toml                 # workspace
+LyraBot/
+├─ Cargo.toml                     # workspace
 ├─ crates/
-│  ├─ qya-core/      # 共享类型：Message/ContentPart/ToolCall/AgentEvent/Usage、命令输出排版 card
-│  ├─ qya-config/    # TOML + secret 文件装载、ArcSwap 热替换
-│  ├─ qya-llm/       # Provider、kimi-code（Chat Completions）、模型目录、思考等级映射、重试、媒体编码
-│  ├─ qya-store/     # SQLite schema 与迁移、会话树、信箱、发件箱、表达库、记忆候选与修订、检索索引、定时任务、清理
-│  ├─ qya-agent/     # pi 式 Kernel：循环、工具注册表、steer/follow-up 队列、折叠与压缩
-│  ├─ qya-orchestra/ # 子代理：派出/续接/专员、上下文继承、汇报与重启恢复
-│  ├─ qya-persona/   # 提示词布局、身份装配、Pacer、表情包、说法学习、记忆整理
-│  ├─ qya-tools/     # 内置工具：shell(+rtk)/fs/memory/todo/cron/mail/komari/blog/skills/recall
-│  ├─ qya-plugins/   # 可插拔提供方：image/tts/search/grok，watch_video，/provider 命令
-│  ├─ qya-douyin/    # 抖音外部服务客户端（校验、净化、确认发布与验证码拦截）
-│  ├─ qya-platform/  # Platform trait；qq（官方）、cli
-│  └─ qya-command/   # /命令解析与帮助
-├─ apps/qya/         # main：配置装载、依赖装配、运行时、聊天命令执行
-├─ assets/           # persona/（角色资产）、agents/（执行者提示）、memory_seed/、tools/（邮件 helper）
-├─ skills/           # SKILL.md 技能
-├─ config/qya.example.toml
-├─ deploy/           # systemd unit、服务器配置模板、安装脚本、部署说明
-├─ ops/douyin/       # 抖音服务源码
+│  ├─ lyrabot-core/               # 共享类型：Message/ContentPart/ToolCall/AgentEvent/Usage、命令输出排版 card
+│  ├─ lyrabot-config/             # TOML + secret 文件装载、ArcSwap 热替换
+│  ├─ lyrabot-llm/                # Provider、kimi-code（Chat Completions）、模型目录、思考等级映射、重试、媒体编码
+│  ├─ lyrabot-store/              # SQLite schema 与迁移、会话树、信箱、发件箱、表达库、记忆候选与修订、检索索引、定时任务、清理
+│  ├─ lyrabot-agent/              # pi 式 Kernel：循环、工具注册表、steer/follow-up 队列、折叠与压缩
+│  ├─ lyrabot-orchestra/          # 子代理：派出/续接/专员、上下文继承、汇报与重启恢复
+│  ├─ lyrabot-persona/            # 提示词布局、身份装配、Pacer、表情包、说法学习、记忆整理
+│  ├─ lyrabot-tools/              # 内置工具：shell(+rtk)/fs/memory/todo/cron/mail/komari/blog/skills/recall
+│  ├─ lyrabot-plugins/            # 可插拔提供方：image/tts/search/grok，watch_video，/provider 命令
+│  ├─ lyrabot-douyin/             # 抖音外部服务客户端（校验、净化、确认发布与验证码拦截）
+│  ├─ lyrabot-platform/           # Platform trait；qq（官方）、cli
+│  └─ lyrabot-command/            # /命令解析与帮助
+├─ apps/lyrabot/                  # main：配置装载、依赖装配、运行时、聊天命令执行
+├─ assets/                        # persona/（角色资产）、agents/（执行者提示）、memory_seed/、tools/（邮件 helper）
+├─ skills/                        # SKILL.md 技能
+├─ config/lyrabot.example.toml
+├─ deploy/                        # systemd unit、服务器配置模板、安装脚本、部署说明
+├─ ops/douyin/                    # 抖音服务源码
 └─ docs/
 ```
 
-依赖方向（单向）：`core ← llm ← agent ← orchestra ← persona`；`tools/plugins/platform/command/douyin` 只依赖 `core`（及必要的 `config`、`store`、`agent`），由 `apps/qya` 装配。禁止反向依赖。
+依赖方向（单向）：`core ← llm ← agent ← orchestra ← persona`；`tools/plugins/platform/command/douyin` 只依赖 `core`（及必要的 `config`、`store`、`agent`），由 `apps/lyrabot` 装配。禁止反向依赖。

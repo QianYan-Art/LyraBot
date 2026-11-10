@@ -1,0 +1,15 @@
+[package]
+name = "lyrabot-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+arc-swap = "1.9.3"
+lyrabot-core = { version = "0.1.0", path = "../lyrabot-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+toml = "1.2.1"
+
+[lints]
+workspace = true

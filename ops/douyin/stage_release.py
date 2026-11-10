@@ -288,7 +288,7 @@ def _existing_release(store: ReleaseStore, release_id: str) -> dict[str, object]
 
 def install_release(
     source_dir: str | os.PathLike[str],
-    data_dir: str | os.PathLike[str] = "/var/lib/tangyuge-douyin",
+    data_dir: str | os.PathLike[str] = "/var/lib/lyrabot-douyin",
     *,
     runner_uid: int | None = None,
     runner_gid: int | None = None,
@@ -358,9 +358,9 @@ def _runner_identity() -> tuple[int, int]:
         import pwd
 
         runner = pwd.getpwnam("douyin-runner")
-        group = grp.getgrnam("tangyuge-douyin")
+        group = grp.getgrnam("lyrabot-douyin")
     except (ImportError, KeyError) as exc:
-        raise ReleaseError("找不到 douyin-runner 或 tangyuge-douyin") from exc
+        raise ReleaseError("找不到 douyin-runner 或 lyrabot-douyin") from exc
     return runner.pw_uid, group.gr_gid
 
 
@@ -378,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
 
     install = commands.add_parser("install", help="安装已暂存的作品包")
     install.add_argument("--source-dir", required=True)
-    install.add_argument("--data-dir", default="/var/lib/tangyuge-douyin")
+    install.add_argument("--data-dir", default="/var/lib/lyrabot-douyin")
 
     args = parser.parse_args(argv)
     try:

@@ -9,6 +9,6 @@ secrets/
 target/
 
 # local dev
-qya.toml
+lyrabot.toml
 data/
 .serena/

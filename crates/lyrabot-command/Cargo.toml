@@ -1,0 +1,11 @@
+[package]
+name = "lyrabot-command"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lyrabot-core = { version = "0.1.0", path = "../lyrabot-core" }
+
+[lints]
+workspace = true

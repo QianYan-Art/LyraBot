@@ -1,17 +1,17 @@
 # 存储、运行与部署
 
-记录日期：2026-11-07（2026-11-09 自 `01-architecture.md` 拆出整理）
-范围：`qya-store`、长期运行与稳定性、构建部署、调试协作约定。服务器上的具体操作步骤见 `deploy/README.md`。
+记录日期：2026-11-07（2026-11-09 自 `01-architecture.md` 拆出整理，2026-11-10 命名统一为 LyraBot）
+范围：`lyrabot-store`、长期运行与稳定性、构建部署、调试协作约定。服务器上的具体操作步骤见 `deploy/README.md`。
 
-## 1. 存储（qya-store）
+## 1. 存储（lyrabot-store）
 
-单个 SQLite 文件（服务器 `/var/lib/qya/qya.db`，WAL，`synchronous=NORMAL`）。读写都经同一个专用线程串行执行（单用户吞吐足够，且避免 `SQLITE_BUSY`）。迁移脚本内嵌，启动时按版本号顺序执行；当前 schema v4。
+单个 SQLite 文件（服务器 `/var/lib/lyrabot/lyrabot.db`，WAL，`synchronous=NORMAL`）。读写都经同一个专用线程串行执行（单用户吞吐足够，且避免 `SQLITE_BUSY`）。迁移脚本内嵌，启动时按版本号顺序执行；当前 schema v4。
 
 | 表 | 用途 |
 |---|---|
 | `sessions` | id、kind(persona/worker/specialist)、name、parent_session、fork_entry、leaf_id、model、effort、status、run_owner（执行者运行标记）、created/updated |
 | `entries` | 会话树条目（见 `03-model-kernel.md` 第 2.3 节） |
-| `mailbox` | 执行者 → 唐语歌的汇报信箱（未确认的汇报，确认后删除） |
+| `mailbox` | 执行者 → 主对话角色的汇报信箱（未确认的汇报，确认后删除） |
 | `run_queue` | 交给运行中执行者、尚未确定写进其会话的插话/追问（v3） |
 | `outbox` | 平台发件箱（暂时没有投递通道的出站消息，v3） |
 | `expressions` | 说法库 |
@@ -24,7 +24,7 @@
 
 - 清理：`/gc [天数]` 与每周一次的自动清理删除已结束且超过 N 天的会话及已归档的后台任务/专员任务会话（默认 30 天），连同其条目、信件、插话、检索索引与 kv；当前会话、排队或运行中的执行者/专员任务、被较新会话引用的历史与还有未确认汇报的会话保留（长期记忆文件独立存放于 `<memory_dir>`，不受会话 GC 影响）。删除较多时执行 `wal_checkpoint(TRUNCATE)` 与 `VACUUM`。
 - 媒体：`<media_dir>` 每小时检查一次，删除 24 小时前的文件，跳过未确认汇报、发件箱与发送中引用的文件。
-- 服务器文件布局：程序 `/opt/qya/bin/qya`（`qya.prev` 为上一版）、资产与文档 `/opt/qya/{persona,agents,skills,tools,docs}`、部署提交号 `/opt/qya/VERSION`；配置 `/etc/qya/qya.toml`、凭据 `/etc/qya/secrets/*`（属主 tangyuge，0600）；数据 `/var/lib/qya/{qya.db,memory,media,stickers,workspace}`；日志进 journald，shell 审计在 `/var/log/qya/audit.jsonl`（达到 5 MB 自动轮转为 `.1`）。
+- 服务器文件布局：程序 `/opt/lyrabot/bin/lyrabot`（`lyrabot.prev` 为上一版）、资产与文档 `/opt/lyrabot/{persona,agents,skills,tools,docs}`、部署提交号 `/opt/lyrabot/VERSION`；配置 `/etc/lyrabot/lyrabot.toml`、凭据 `/etc/lyrabot/secrets/*`（属主 `lyrabot`，0600）；数据 `/var/lib/lyrabot/{lyrabot.db,memory,media,stickers,workspace}`；日志进 journald，shell 审计在 `/var/log/lyrabot/audit.jsonl`（达到 5 MB 自动轮转为 `.1`）。
 
 ## 2. 长期运行与稳定性
 
@@ -46,15 +46,15 @@
 
 ## 3. 构建与部署
 
-- 本地：cargo-zigbuild 交叉编译到 `x86_64-unknown-linux-gnu`（目标机 Debian 13 x86_64，命令见 `deploy/README.md`），只从干净且已推送的提交构建；二进制内嵌构建提交（有未提交改动时带 `-dirty`），`qya --version`、`--check` 与 `/status` 首行显示。
-- 部署：产物上传为 `/opt/qya/bin/qya.new`，保留 `qya.prev` 后替换并 `systemctl restart qya`；同一提交的 `persona/ agents/ tools/ skills/` 与 `docs/`（`docs/*.md`、`deploy/README.md` 改名 `deploy.md`、`config/qya.example.toml`）一并同步，并写入 `/opt/qya/VERSION`。只改人格或技能时同步对应目录后在 QQ 发 `/reload`。涉及数据库迁移的版本，停服前先在线备份数据库，稳定后删除备份。
-- 运行用户 `tangyuge`（加入 `blogsync`、`tangyuge-douyin` 组）；邮件 SSH key 与 Komari 配置在 `/etc/qya/secrets/`。首次安装用 `deploy/install.sh`，布局、RTK 升级、隔离测试与人工操作抖音浏览器等步骤见 `deploy/README.md`。
-- 回滚：只用上一版二进制 `qya.prev`；Hermes 已于 2026-11-08 完全移除，不再能回滚到 Hermes。
-- 统一基线：本机 `git rev-parse --short=12 HEAD`、GitHub `main`、服务器 `/opt/qya/VERSION` 与 `/status` 首行应一致。
+- 本地：cargo-zigbuild 交叉编译到 `x86_64-unknown-linux-gnu`（目标机 Debian 13 x86_64，命令见 `deploy/README.md`），只从干净且已推送的提交构建；二进制内嵌构建提交（有未提交改动时带 `-dirty`），`lyrabot --version`、`--check` 与 `/status` 首行显示。
+- 部署：产物上传为 `/opt/lyrabot/bin/lyrabot.new`，保留 `lyrabot.prev` 后替换并 `systemctl restart lyrabot`；同一提交的 `persona/ agents/ tools/ skills/` 与 `docs/`（`docs/*.md`、`deploy/README.md` 改名 `deploy.md`、`config/lyrabot.example.toml`）一并同步，并写入 `/opt/lyrabot/VERSION`。只改人格或技能时同步对应目录后在 QQ 发 `/reload`。涉及数据库迁移的版本，停服前先在线备份数据库，稳定后删除备份。
+- 运行用户 `lyrabot`（加入 `blogsync`、`lyrabot-douyin` 组）；邮件 SSH key 与 Komari 配置在 `/etc/lyrabot/secrets/`。首次安装用 `deploy/install.sh`，布局、RTK 升级、隔离测试与人工操作抖音浏览器等步骤见 `deploy/README.md`。
+- 回滚：只用上一版二进制 `lyrabot.prev`；Hermes 已于 2026-11-08 完全移除，不再能回滚到 Hermes。
+- 统一基线：本机 `git rev-parse --short=12 HEAD`、GitHub `main`、服务器 `/opt/lyrabot/VERSION` 与 `/status` 首行应一致。
 
 ## 4. 调试与协作约定
 
 - 子代理默认 `claude-haiku-5-5`、思考等级 xhigh，最多 3 个并行，写入范围互不重叠。
 - 代码疑难问题可在终端调用本机 `codex` CLI 做只读 debug 分析；结论需回到代码和测试中验证。
 - 开发检查与 CI 一致：`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`。
-- 不提交、不推送，除非阿颜当次授权；secret 文件全部被 `.gitignore` 排除。
+- 不提交、不推送，除非用户当次授权；secret 文件全部被 `.gitignore` 排除。

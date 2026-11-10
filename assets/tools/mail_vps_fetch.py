@@ -4,8 +4,8 @@
 连接参数不写在这里。本仓库是公开的，主机、端口、SSH 用户和私钥路径都从服务器
 本地的 ``mail_vps.toml`` 读取，查找顺序：
 
-1. ``$QYA_MAIL_VPS_CONFIG``（qya 调用时总会设置）
-2. ``~/.config/qya/mail_vps.toml``（手动调试用）
+1. ``$LYRABOT_MAIL_VPS_CONFIG``（lyrabot 调用时总会设置）
+2. ``~/.config/lyrabot/mail_vps.toml``（手动调试用）
 
 配置缺失或不完整时返回结构化错误，不回退到任何内置默认地址。
 """
@@ -45,10 +45,10 @@ class ConfigError(Exception):
 
 
 def _config_path() -> Path:
-    override = os.environ.get("QYA_MAIL_VPS_CONFIG", "").strip()
+    override = os.environ.get("LYRABOT_MAIL_VPS_CONFIG", "").strip()
     if override:
         return Path(override).expanduser()
-    return Path.home() / ".config" / "qya" / "mail_vps.toml"
+    return Path.home() / ".config" / "lyrabot" / "mail_vps.toml"
 
 
 def _load_config() -> dict:
@@ -75,9 +75,9 @@ def _load_config() -> dict:
 
 
 def _cache_dirs(cfg: dict) -> tuple[Path, Path, int]:
-    """附件目录、验证链接目录、保留小时数。缺省沿用 HERMES_HOME 下的既有位置。"""
-    home = os.environ.get("HERMES_HOME", "").strip()
-    base = Path(home).expanduser() if home else Path.home() / ".hermes"
+    """附件目录、验证链接目录、保留小时数。缺省放在 ~/.lyrabot/cache 下。"""
+    home = os.environ.get("LYRABOT_HOME", "").strip()
+    base = Path(home).expanduser() if home else Path.home() / ".lyrabot"
     cache = cfg.get("cache") if isinstance(cfg.get("cache"), dict) else {}
     attachments = str(cache.get("attachments_dir") or "").strip()
     links = str(cache.get("links_dir") or "").strip()

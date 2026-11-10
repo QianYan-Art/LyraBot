@@ -887,7 +887,7 @@ class ContentManager:
             source = await self._video_source(page, activate=True)
             await self._verify_metadata(page, plan)
             marker = secrets.token_hex(32)
-            await page.evaluate("marker => { window.__tangyugeEditorProof = marker; }", marker)
+            await page.evaluate("marker => { window.__lyrabotEditorProof = marker; }", marker)
             self._staged[plan["token"]] = {"page": page, "context": self.browser._context,
                 "marker": marker, "video_source": source, "cover": cover_evidence,
                 "deadline": time.monotonic() + EDITOR_LEASE_SECONDS}
@@ -926,7 +926,7 @@ class ContentManager:
             raise UploadFailedError("平台报告视频上传失败，未形成发布预览；可按原片重新上传。")
         source = await self._video_source(page, activate=True)
         marker = secrets.token_hex(32)
-        await page.evaluate("marker => { window.__tangyugeUploadProof = marker; }", marker)
+        await page.evaluate("marker => { window.__lyrabotUploadProof = marker; }", marker)
         self._uploads[plan["token"]] = {"page": page, "context": self.browser._context,
             "marker": marker, "video_source": source, "fingerprint": plan["fingerprint"],
             "video_sha256": current["video_sha256"], "deadline": time.monotonic() + EDITOR_LEASE_SECONDS}
@@ -941,7 +941,7 @@ class ContentManager:
                 or proof["fingerprint"] != plan["fingerprint"] or proof["video_sha256"] != plan["video_sha256"]
                 or plan["account"] != self.browser.config.expected_account):
             raise ValueError("已上传视频的页面、账号或计划已变化")
-        if await page.evaluate("() => window.__tangyugeUploadProof || null") != proof["marker"]:
+        if await page.evaluate("() => window.__lyrabotUploadProof || null") != proof["marker"]:
             raise ValueError("已上传视频的文档已变化")
         # 编辑封面会切走视频预览；仅在构建或恢复stage时切回，再核对同一上传源。
         # 正式发布仍由_verified_stage只读核验，不借此重建发布证明。
@@ -994,7 +994,7 @@ class ContentManager:
         page = proof["page"]
         if self.browser._context is not proof["context"] or page.is_closed() or not _safe_editor_url(page.url):
             raise ValueError("浏览器上下文或编辑页发生变化")
-        marker = await page.evaluate("() => window.__tangyugeEditorProof || null")
+        marker = await page.evaluate("() => window.__lyrabotEditorProof || null")
         if marker != proof["marker"] or await self._video_source(page) != proof["video_source"]:
             raise ValueError("上传视频或编辑文档发生变化，旧确认无效")
         await self._verify_metadata(page, plan)
@@ -1097,7 +1097,7 @@ class ContentManager:
             return False
         try:
             marker = await waiter.page.evaluate(
-                "() => window.__tangyugeVerificationProof || null"
+                "() => window.__lyrabotVerificationProof || null"
             )
         except Exception:
             self._invalidate_verification_waiter(waiter)
@@ -1449,10 +1449,10 @@ class ContentManager:
                 raise ValueError("短信验证页面地址已变化") from None
             marker = secrets.token_urlsafe(32)
             await page.evaluate(
-                "marker => { window.__tangyugeVerificationProof = marker; }", marker
+                "marker => { window.__lyrabotVerificationProof = marker; }", marker
             )
             if await page.evaluate(
-                "() => window.__tangyugeVerificationProof || null"
+                "() => window.__lyrabotVerificationProof || null"
             ) != marker:
                 raise ValueError("短信验证文档标记未能绑定到当前页面") from None
             job["verification_required"] = "sms"

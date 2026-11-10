@@ -1,0 +1,11 @@
+{
+  "host": "your.server.example",
+  "user": "root",
+  "port": 22,
+  "identity_file": "C:/Users/you/.ssh/id_ed25519",
+  "projects_root": "C:/Users/you/Videos/OpenFilm/Projects",
+  "server_source": "/opt/lyrabot-douyin",
+  "ops_dir": "C:/path/to/LyraBot/ops/douyin",
+  "python": "",
+  "cleanup_tool": ""
+}

@@ -1,6 +1,6 @@
 # LyraBot
 
-用 Rust 写的常驻个人 agent。门面是角色“唐语歌（Lyra）”，在 QQ 私聊里聊天；需要真正动手的活交给后台执行者和常驻专员，做完再由她用自己的话转述。单个二进制，常驻内存约 30 MB。项目内部代号 **qya**（二进制、crate 前缀、配置目录都用这个名字）。
+用 Rust 写的常驻个人 agent。门面是主对话角色（默认示例为“唐语歌（Lyra）”），在 QQ 私聊里聊天；需要真正动手的活交给后台执行者和常驻专员，做完再由主对话角色用自己的话转述。单个二进制，常驻内存约 30 MB。
 
 > A single-binary personal agent in Rust. A persona front (“Lyra”) chats on QQ while background workers and long-lived specialists do the actual work: pi-style kernel, multi-agent session inheritance, prompt-cache-friendly persona layout, durable report delivery, ~30 MB RSS.
 
@@ -14,13 +14,13 @@
 - 翻旧账：`recall` 工具按需检索已结束会话的原文与摘要（SQLite FTS5 trigram），不用不占任何 token。
 
 **多代理**
-- 唐语歌只用轻工具（生图、语音、搜索、定时提醒、记忆、表情包），重活经 `delegate` 派出，工具输出不进入角色上下文。
+- 主对话角色只用轻工具（生图、语音、搜索、定时提醒、记忆、表情包），重活经 `delegate` 派出，工具输出不进入角色上下文。
 - 三种上下文继承：`fork`（零拷贝继承当前对话分支）、`brief`（任务 + 背景说明）、`fresh`；每个子代理可单独指定模型与思考等级。
 - 任务型 worker 与专员（如运维、创作）均按单次任务开启独立会话、做完归档可续接、可清理；专员额外保有专属工具白名单与长期工作记忆文件（`ops.md`、`creator.md`），同专员并发任务串行排队。
 - 执行者可以用 `need_decision` 提出一个需要用户拍板的问题，汇报时单独转达；用户的续接有预留并发名额，不会排在新任务后面。
 
 **可靠性**
-- 先存后投：后台汇报先写进 SQLite 信箱，唐语歌那一轮得到回应后才确认；QQ 没有可用回复通道时消息写入发件箱，用户下次说话后合并补发。进程在任何时刻重启都不丢结果。
+- 先存后投：后台汇报先写进 SQLite 信箱，主对话角色那一轮得到回应后才确认；QQ 没有可用回复通道时消息写入发件箱，用户下次说话后合并补发。进程在任何时刻重启都不丢结果。
 - 重启时仍在排队或运行的后台任务会被识别为“被中断”并告知用户，续接时执行者先核对已做的部分再继续。
 - 内核：取消时消息结构保持合法，被打断的输入原样交回重排；工具调用预算在执行前检查；上下文到 90% 时先折叠较早的工具结果，不够再做枚举式摘要与任务胶囊。
 - 子进程读写与等待并发、输出有上限，取消或丢弃时终止整个进程组；QQ 网关断线自动 Resume，心跳未确认会主动重连。
@@ -35,50 +35,50 @@
 
 ```mermaid
 flowchart TD
-    QQ["QQ 官方网关"] --> P["平台层 qya-platform<br/>入站过滤 · 被动/主动回复路由 · 发件箱"]
+    QQ["QQ 官方网关"] --> P["平台层 lyrabot-platform<br/>入站过滤 · 被动/主动回复路由 · 发件箱"]
     P --> I{"前置拦截"}
-    I -->|"/命令"| C["命令 qya-command<br/>不经模型"]
-    I -->|"抖音确认 / 验证码"| D["qya-douyin"]
+    I -->|"/命令"| C["命令 lyrabot-command<br/>不经模型"]
+    I -->|"抖音确认 / 验证码"| D["lyrabot-douyin"]
     I -->|"聊天"| PC["回复节奏 Pacer"]
-    PC --> L["唐语歌 · 人格层 qya-persona<br/>身份 + 记忆快照 + 轻工具"]
-    L -->|"delegate"| O["编排 qya-orchestra<br/>worker / 常驻专员"]
-    O -->|"汇报先写入信箱"| M[("SQLite qya-store<br/>会话树 · 信箱 · 发件箱")]
+    PC --> L["人格层 lyrabot-persona<br/>身份 + 记忆快照 + 轻工具"]
+    L -->|"delegate"| O["编排 lyrabot-orchestra<br/>worker / 常驻专员"]
+    O -->|"汇报先写入信箱"| M[("SQLite lyrabot-store<br/>会话树 · 信箱 · 发件箱")]
     M -->|"〔后台结果〕"| PC
-    L --> K["内核 qya-agent<br/>流式循环 · 工具调度 · 压缩"]
+    L --> K["内核 lyrabot-agent<br/>流式循环 · 工具调度 · 压缩"]
     O --> K
-    K --> LLM["模型 qya-llm<br/>OpenAI 兼容 Chat Completions"]
-    K --> T["工具 qya-tools / qya-plugins"]
+    K --> LLM["模型 lyrabot-llm<br/>OpenAI 兼容 Chat Completions"]
+    K --> T["工具 lyrabot-tools / lyrabot-plugins"]
     K --> M
 ```
 
 | crate | 职责 |
 |---|---|
-| `qya-core` / `qya-config` | 共享类型；TOML + secret 文件配置，ArcSwap 热替换 |
-| `qya-llm` | 流式 Chat Completions、思考等级映射、缓存命中统计、错误分类与重试 |
-| `qya-store` | SQLite（WAL，单写线程）：会话树、汇报信箱、发件箱、表达库、定时任务、清理 |
-| `qya-agent` | 内核循环、工具抽象、上下文构建与压缩 |
-| `qya-persona` | 身份渲染、记忆快照、资料工具、表情包、回复节奏、表达学习 |
-| `qya-orchestra` | 派活、上下文继承、续接、专员、汇报与重启恢复 |
-| `qya-tools` | shell、文件、记忆、todo、cron、技能、邮件、博客同步、流量日报 |
-| `qya-plugins` | 生图、语音、网页搜索、grok |
-| `qya-douyin` | 抖音外部服务客户端（校验、净化、确认与验证码拦截） |
-| `qya-platform` | QQ 官方机器人单聊、命令行 |
-| `apps/qya` | 装配、运行时、聊天命令 |
+| `lyrabot-core` / `lyrabot-config` | 共享类型；TOML + secret 文件配置，ArcSwap 热替换 |
+| `lyrabot-llm` | 流式 Chat Completions、思考等级映射、缓存命中统计、错误分类与重试 |
+| `lyrabot-store` | SQLite（WAL，单写线程）：会话树、汇报信箱、发件箱、表达库、定时任务、清理 |
+| `lyrabot-agent` | 内核循环、工具抽象、上下文构建与压缩 |
+| `lyrabot-persona` | 身份渲染、记忆快照、资料工具、表情包、回复节奏、表达学习 |
+| `lyrabot-orchestra` | 派活、上下文继承、续接、专员、汇报与重启恢复 |
+| `lyrabot-tools` | shell、文件、记忆、todo、cron、技能、邮件、博客同步、流量日报 |
+| `lyrabot-plugins` | 生图、语音、网页搜索、grok |
+| `lyrabot-douyin` | 抖音外部服务客户端（校验、净化、确认与验证码拦截） |
+| `lyrabot-platform` | QQ 官方机器人单聊、命令行 |
+| `apps/lyrabot` | 装配、运行时、聊天命令 |
 
 设计细节从 [`docs/01-architecture.md`](docs/01-architecture.md)（总览与文档索引）开始，按模块分为 `03`–`08` 六篇；需求与关键决策见 [`docs/00-PRD.md`](docs/00-PRD.md)、[`docs/02-decisions.md`](docs/02-decisions.md)，还没做的事见 [`docs/09-backlog.md`](docs/09-backlog.md)。
 
 ## 快速开始（本地命令行）
 
 ```bash
-cargo build --release -p qya
-cp config/qya.example.toml qya.toml        # 按需修改；secret 放在 *_file 指向的文件里
+cargo build --release -p lyrabot
+cp config/lyrabot.example.toml lyrabot.toml        # 按需修改；secret 放在 *_file 指向的文件里
 mkdir -p secrets && echo "<your-key>" > secrets/kimi.key
-./target/release/qya --config qya.toml --check      # 自检：配置、数据库、模型连通性
-./target/release/qya --config qya.toml --cli        # 流式命令行
-./target/release/qya --config qya.toml --no-stream  # 模拟 QQ 的分段发送
+./target/release/lyrabot --config lyrabot.toml --check      # 自检：配置、数据库、模型连通性
+./target/release/lyrabot --config lyrabot.toml --cli        # 流式命令行
+./target/release/lyrabot --config lyrabot.toml --no-stream  # 模拟 QQ 的分段发送
 ```
 
-正式运行：`qya --config /etc/qya/qya.toml --qq`（需要配置 `[platforms.qq]`）。服务器部署、更新与目录布局见 [`deploy/README.md`](deploy/README.md)。
+正式运行：`lyrabot --config /etc/lyrabot/lyrabot.toml --qq`（需要配置 `[platforms.qq]`）。服务器部署、更新与目录布局见 [`deploy/README.md`](deploy/README.md)。
 
 开发检查与 CI 一致：
 
@@ -89,7 +89,7 @@ cargo test --workspace
 
 ## 自定义角色与称呼
 
-仓库默认自带作者自用的角色“唐语歌”与称呼“阿颜”作为完整生产示例。所有内置工具说明、后台执行者提示词（`assets/agents/worker.md`）与 `qya-docs` 技能均已使用通用表述，角色名与用户称呼已从代码中完全解耦。替换成你自己的角色**不需要修改 Rust 代码**，只需调整 `assets/persona/` 目录（首次部署时亦可按需调整或清空 `assets/memory_seed/` 下的初始记忆种子）：
+仓库默认自带作者自用的角色“唐语歌”与称呼“阿颜”作为完整生产示例。所有内置工具说明、后台执行者提示词（`assets/agents/worker.md`）与 `lyrabot-docs` 技能均已使用通用表述，角色名与用户称呼已从代码中完全解耦。替换成你自己的角色**不需要修改 Rust 代码**，只需调整 `assets/persona/` 目录（首次部署时亦可按需调整或清空 `assets/memory_seed/` 下的初始记忆种子）：
 
 1. **修改你的称呼**：编辑 `assets/persona/persona.toml` 中的 `user_name = "你的称呼"`。
 2. **替换角色卡**：用你的 SillyTavern 角色卡覆盖 `assets/persona/card.json`（支持标准 `chara_card_v2` 顶层结构或 `{"spec": "chara_card_v2", "data": {...}}` 包装结构）。角色名直接取自卡内的 `name` 字段；角色卡与所有 `.md` 文件中的 `{{char}}`、`{{user}}` 占位符会在渲染时自动替换。
@@ -103,7 +103,7 @@ cargo test --workspace
      - **按需层（`notes/*.md` + `[[notes]]`）**：把外貌穿搭、特定情境反应、人际关系细节、过往经历等“聊到相关话题才需要”的设定拆成若干 `.md` 放进 `notes/`，并在 `persona.toml` 中声明 `[[notes]]`（填好 `id`、`file` 与 `use` 查阅时机说明）。程序会根据 `[[notes]]` 动态生成 `persona_notes(topic)` 工具的参数枚举与说明，让模型在聊到对应话题时按需查阅。
    - **情况 C：角色卡内含 SillyTavern 世界书（`character_book`）**
      `constant = true` 且 `enabled = true` 的常驻条目会自动拼入 S1 `## 补充设定`；其余非常驻条目若内容较多，建议按主题整理成 `notes/*.md` 并配置到 `[[notes]]` 中按需读取。
-4. **检验与生效**：运行 `qya --config qya.toml --check` 核对渲染后的 S1 字数与启用的工具列表；运行中修改后在聊天里发 `/reload`，再发 `/new` 或 `/compact` 即可生效。详细字段映射与配置示例见 [`docs/04-persona-memory.md`](docs/04-persona-memory.md) 第 1.1 节。
+4. **检验与生效**：运行 `lyrabot --config lyrabot.toml --check` 核对渲染后的 S1 字数与启用的工具列表；运行中修改后在聊天里发 `/reload`，再发 `/new` 或 `/compact` 即可生效。详细字段映射与配置示例见 [`docs/04-persona-memory.md`](docs/04-persona-memory.md) 第 1.1 节。
 
 ## 聊天命令
 

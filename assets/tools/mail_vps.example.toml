@@ -1,9 +1,9 @@
 # 邮件 VPS 连接配置示例。
 #
-# 真实文件放在服务器上的 /etc/qya/secrets/mail_vps.toml（qya.toml 的 tools.mail.config），权限 600，不入仓库。
+# 真实文件放在服务器上的 /etc/lyrabot/secrets/mail_vps.toml（lyrabot.toml 的 tools.mail.config），权限 600，不入仓库。
 # 本仓库是公开的，示例里的地址、端口和用户名都是占位符，不要回填真实值。
 #
-# 查找顺序：$QYA_MAIL_VPS_CONFIG（qya 调用时设置）→ ~/.config/qya/mail_vps.toml
+# 查找顺序：$LYRABOT_MAIL_VPS_CONFIG（lyrabot 调用时设置）→ ~/.config/lyrabot/mail_vps.toml
 
 host = "mail-vps.example.invalid"
 port = 22
@@ -11,16 +11,16 @@ port = 22
 # 读操作（list-mailboxes / read-mail / list-attachments / fetch-attachment）用受限 key。
 [readonly]
 user = "mailreader"
-key = "/etc/qya/secrets/mail_vps_readonly_ed25519"
+key = "/etc/lyrabot/secrets/mail_vps_readonly_ed25519"
 
 # 写操作（send-mail / reply-mail / forward-mail / move-mail-to-trash / delete-mail）单独一把 key。
 [readwrite]
 user = "mailwriter"
-key = "/etc/qya/secrets/mail_vps_readwrite_ed25519"
+key = "/etc/lyrabot/secrets/mail_vps_readwrite_ed25519"
 
 # 附件与验证链接的本地落点。
 # helper 每次调用时按 retention_hours 自行回收。
 [cache]
-attachments_dir = "/var/lib/qya/media/mail_attachments"
-links_dir = "/var/lib/qya/media/mail_verification_links"
+attachments_dir = "/var/lib/lyrabot/media/mail_attachments"
+links_dir = "/var/lib/lyrabot/media/mail_verification_links"
 retention_hours = 24

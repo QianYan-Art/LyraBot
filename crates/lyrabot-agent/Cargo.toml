@@ -1,0 +1,25 @@
+[package]
+name = "lyrabot-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = "0.1.92"
+futures-util = "0.3.34"
+lyrabot-config = { version = "0.1.0", path = "../lyrabot-config" }
+lyrabot-core = { version = "0.1.0", path = "../lyrabot-core" }
+lyrabot-llm = { version = "0.1.0", path = "../lyrabot-llm" }
+lyrabot-store = { version = "0.1.0", path = "../lyrabot-store" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt", "sync", "macros", "time"] }
+tokio-util = "0.7.20"
+tracing = "0.1.44"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "test-util"] }

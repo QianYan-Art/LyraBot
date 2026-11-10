@@ -18,9 +18,9 @@ import releases
 import stage_release
 
 
-DEFAULT_SERVER_SOURCE = "/opt/tangyuge-douyin"
-REMOTE_UPLOAD_PREFIX = "/tmp/tangyuge-douyin-upload."
-_REMOTE_UPLOAD_PATTERN = re.compile(r"^/tmp/tangyuge-douyin-upload\.[A-Za-z0-9]{10,64}$", re.ASCII)
+DEFAULT_SERVER_SOURCE = "/opt/lyrabot-douyin"
+REMOTE_UPLOAD_PREFIX = "/tmp/lyrabot-douyin-upload."
+_REMOTE_UPLOAD_PATTERN = re.compile(r"^/tmp/lyrabot-douyin-upload\.[A-Za-z0-9]{10,64}$", re.ASCII)
 _USER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,31}$", re.ASCII)
 _HOST_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$", re.ASCII)
 _REMOTE_COMPONENT_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$", re.ASCII)
@@ -34,7 +34,7 @@ _REMOTE_INSPECT_SCRIPT = "\n".join(
         "source_root, manifest_path, release_id = sys.argv[1:]",
         "try:",
         "    expected = validate_manifest(json.loads(Path(manifest_path).read_text(encoding='utf-8')))",
-        "    store = ReleaseStore('/var/lib/tangyuge-douyin')",
+        "    store = ReleaseStore('/var/lib/lyrabot-douyin')",
         "    package_path = store.releases_dir / release_id",
         "    if not os.path.lexists(package_path):",
         "        print(json.dumps({'state': 'missing'}))",
@@ -330,7 +330,7 @@ def sync_release(
     release_id = releases.validate_release_id(release_id)
     video_path, initial_state = _validate_video_path(video, config.projects_root)
 
-    with tempfile.TemporaryDirectory(prefix=".tmp-tangyuge-sync-", dir=video_path.parent) as local_directory:
+    with tempfile.TemporaryDirectory(prefix=".tmp-lyrabot-sync-", dir=video_path.parent) as local_directory:
         manifest_path = Path(local_directory) / "manifest.json"
         manifest = stage_release.prepare_release(
             video_path,

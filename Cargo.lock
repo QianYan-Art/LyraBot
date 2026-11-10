@@ -1011,6 +1011,235 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
+name = "lyrabot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "jiff",
+ "lyrabot-agent",
+ "lyrabot-command",
+ "lyrabot-config",
+ "lyrabot-core",
+ "lyrabot-douyin",
+ "lyrabot-llm",
+ "lyrabot-orchestra",
+ "lyrabot-persona",
+ "lyrabot-platform",
+ "lyrabot-plugins",
+ "lyrabot-store",
+ "lyrabot-tools",
+ "memory-stats",
+ "mimalloc",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "lyrabot-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "lyrabot-config",
+ "lyrabot-core",
+ "lyrabot-llm",
+ "lyrabot-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "lyrabot-command"
+version = "0.1.0"
+dependencies = [
+ "lyrabot-core",
+]
+
+[[package]]
+name = "lyrabot-config"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "lyrabot-core",
+ "serde",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
+name = "lyrabot-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "lyrabot-douyin"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "hex",
+ "jiff",
+ "lyrabot-agent",
+ "lyrabot-config",
+ "lyrabot-core",
+ "rand",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "lyrabot-llm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "futures-util",
+ "lyrabot-config",
+ "lyrabot-core",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
+name = "lyrabot-orchestra"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "lyrabot-agent",
+ "lyrabot-config",
+ "lyrabot-core",
+ "lyrabot-llm",
+ "lyrabot-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "lyrabot-persona"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "async-trait",
+ "jiff",
+ "lyrabot-agent",
+ "lyrabot-config",
+ "lyrabot-core",
+ "lyrabot-llm",
+ "lyrabot-store",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "lyrabot-platform"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "futures-util",
+ "jiff",
+ "lyrabot-config",
+ "lyrabot-core",
+ "lyrabot-store",
+ "reqwest",
+ "rusqlite",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
+name = "lyrabot-plugins"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "lyrabot-agent",
+ "lyrabot-config",
+ "lyrabot-core",
+ "lyrabot-llm",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "toml_edit",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
+name = "lyrabot-store"
+version = "0.1.0"
+dependencies = [
+ "lyrabot-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lyrabot-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "croner",
+ "jiff",
+ "lyrabot-agent",
+ "lyrabot-config",
+ "lyrabot-core",
+ "lyrabot-store",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1170,235 +1399,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
-]
-
-[[package]]
-name = "qya"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "jiff",
- "memory-stats",
- "mimalloc",
- "qya-agent",
- "qya-command",
- "qya-config",
- "qya-core",
- "qya-douyin",
- "qya-llm",
- "qya-orchestra",
- "qya-persona",
- "qya-platform",
- "qya-plugins",
- "qya-store",
- "qya-tools",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "qya-agent"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures-util",
- "qya-config",
- "qya-core",
- "qya-llm",
- "qya-store",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "qya-command"
-version = "0.1.0"
-dependencies = [
- "qya-core",
-]
-
-[[package]]
-name = "qya-config"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "qya-core",
- "serde",
- "thiserror",
- "toml",
-]
-
-[[package]]
-name = "qya-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "qya-douyin"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "hex",
- "jiff",
- "qya-agent",
- "qya-config",
- "qya-core",
- "rand",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "qya-llm"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "futures-util",
- "qya-config",
- "qya-core",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "wiremock",
-]
-
-[[package]]
-name = "qya-orchestra"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "qya-agent",
- "qya-config",
- "qya-core",
- "qya-llm",
- "qya-store",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "qya-persona"
-version = "0.1.0"
-dependencies = [
- "aho-corasick",
- "async-trait",
- "jiff",
- "qya-agent",
- "qya-config",
- "qya-core",
- "qya-llm",
- "qya-store",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "qya-platform"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "futures-util",
- "jiff",
- "qya-config",
- "qya-core",
- "qya-store",
- "reqwest",
- "rusqlite",
- "rustls",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "wiremock",
-]
-
-[[package]]
-name = "qya-plugins"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "qya-agent",
- "qya-config",
- "qya-core",
- "qya-llm",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "toml",
- "toml_edit",
- "tracing",
- "wiremock",
-]
-
-[[package]]
-name = "qya-store"
-version = "0.1.0"
-dependencies = [
- "qya-core",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "qya-tools"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "croner",
- "jiff",
- "qya-agent",
- "qya-config",
- "qya-core",
- "qya-store",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
 ]
 
 [[package]]

@@ -1,0 +1,21 @@
+[Unit]
+Description=LyraBot personal agent
+After=network-online.target lyrabot-douyin.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lyrabot
+Group=lyrabot
+WorkingDirectory=/var/lib/lyrabot
+Environment=LYRABOT_LOG=warn,lyrabot=info
+ExecStart=/opt/lyrabot/bin/lyrabot --config /etc/lyrabot/lyrabot.toml --qq
+Restart=always
+RestartSec=5
+# 常驻内存目标 ≤40 MB，这里只是失控保护
+MemoryMax=400M
+TimeoutStopSec=20
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

@@ -11,8 +11,8 @@ import string
 import subprocess
 import time
 
-UNITS = ("tangyuge-douyin-manual-web.service", "tangyuge-douyin-manual-vnc.service")
-PASSWORD_FILE = Path("/run/tangyuge-douyin/manual.pass")
+UNITS = ("lyrabot-douyin-manual-web.service", "lyrabot-douyin-manual-vnc.service")
+PASSWORD_FILE = Path("/run/lyrabot-douyin/manual.pass")
 
 
 def listener_belongs_to_unit(unit, port, *, proc_root=Path("/proc"), cgroup_root=Path("/sys/fs/cgroup")):
@@ -49,15 +49,15 @@ def listener_belongs_to_unit(unit, port, *, proc_root=Path("/proc"), cgroup_root
 
 def start_units(pid, display, authority):
     subprocess.run([
-        "systemd-run", "--unit=tangyuge-douyin-manual-vnc", "--property=RuntimeMaxSec=15min",
+        "systemd-run", "--unit=lyrabot-douyin-manual-vnc", "--property=RuntimeMaxSec=15min",
         "nsenter", "--target", pid, "--mount", "--", "runuser", "-u", "douyin-runner", "--",
         "/usr/bin/x11vnc", "-norc", "-nocmds", "-localhost", "-listen", "127.0.0.1", "-no6",
         "-rfbport", "5905", "-passwdfile", "rm:" + str(PASSWORD_FILE), "-display", display,
         "-auth", authority, "-noshm", "-noxdamage", "-nosel", "-forever",
     ], check=True)
     subprocess.run([
-        "systemd-run", "--unit=tangyuge-douyin-manual-web", "--property=RuntimeMaxSec=15min",
-        "--property=User=douyin-runner", "--property=Group=tangyuge-douyin",
+        "systemd-run", "--unit=lyrabot-douyin-manual-web", "--property=RuntimeMaxSec=15min",
+        "--property=User=douyin-runner", "--property=Group=lyrabot-douyin",
         "/usr/bin/websockify", "--web=/usr/share/novnc", "127.0.0.1:6085", "127.0.0.1:5905",
     ], check=True)
     for port, unit in ((5905, UNITS[1]), (6085, UNITS[0])):
@@ -95,8 +95,8 @@ def open_window():
     for unit in UNITS:
         if subprocess.run(["systemctl", "is-active", "--quiet", unit]).returncode == 0:
             raise RuntimeError("窗口已存在；请先关闭旧窗口")
-    group = subprocess.check_output(["systemctl", "show", "tangyuge-douyin.service", "-p", "ControlGroup", "--value"], text=True).strip()
-    if not group.startswith("/system.slice/tangyuge-douyin.service"):
+    group = subprocess.check_output(["systemctl", "show", "lyrabot-douyin.service", "-p", "ControlGroup", "--value"], text=True).strip()
+    if not group.startswith("/system.slice/lyrabot-douyin.service"):
         raise RuntimeError("浏览器服务控制组不符")
     runner = pwd.getpwnam("douyin-runner")
     candidates = []
@@ -104,7 +104,7 @@ def open_window():
         proc = Path("/proc") / pid
         try:
             arguments = (proc / "cmdline").read_bytes().split(b"\0")
-            if proc.stat().st_uid == runner.pw_uid and arguments[:2] == [b"/opt/tangyuge-douyin/venv/bin/python", b"/opt/tangyuge-douyin/service.py"]:
+            if proc.stat().st_uid == runner.pw_uid and arguments[:2] == [b"/opt/lyrabot-douyin/venv/bin/python", b"/opt/lyrabot-douyin/service.py"]:
                 candidates.append(pid)
         except FileNotFoundError:
             continue
