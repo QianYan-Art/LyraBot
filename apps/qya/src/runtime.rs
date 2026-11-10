@@ -111,12 +111,13 @@ impl State {
         !self.pending.is_empty() || self.mail.iter().any(|r| r.notify == Notify::Relay)
     }
 
-    /// 取消正在进行的保活请求并重置保活计数；`clear_timer` 为真时一并清空上次模型请求时间（会话/模型切换后需等新对话再开始保活）。
+    /// 取消正在进行的保活请求、自增保活代次并重置计数；`clear_timer` 为真时一并清空上次模型请求时间（会话/模型切换或 /stop 后需等新对话再开始保活）。
     fn reset_keepalive(&mut self, clear_timer: bool) {
         if let Some(c) = self.keepalive_cancel.take() {
             c.cancel();
         }
         self.keepalive_count = 0;
+        self.keepalive_epoch += 1;
         if clear_timer {
             self.last_llm_at = None;
         }
@@ -172,6 +173,8 @@ struct State {
     last_llm_at: Option<Instant>,
     /// 自用户上次说话以来已连续保活的次数
     keepalive_count: u32,
+    /// 保活状态代次；切换会话/模型、重载或 /stop 时自增，使进行中的旧轮次或旧保活无法写回新状态
+    keepalive_epoch: u64,
     /// 当前进行中的保活请求取消令牌
     keepalive_cancel: Option<CancellationToken>,
     last_usage: Usage,
@@ -478,6 +481,7 @@ impl Runtime {
         keep.extend(self.sup.active_ids());
         let r = self.store.gc_sessions(days, keep).await?;
         self.sup.forget(&r.deleted_ids);
+        self.kernel.forget_sessions(&r.deleted_ids);
         let mb = |b: i64| b as f64 / 1048576.0;
         let mut c = Card::new("🧹", "清理完成");
         c.line(format!("结束超过 {days} 天的会话"))
@@ -524,11 +528,14 @@ impl Runtime {
         Ok(c.build())
     }
 
-    /// 占住空闲态（临时置为 Delivering，析构时恢复 Idle），防止会话切换或手动压缩期间启动新轮次。
+    /// 占住空闲态（临时置为 Delivering，析构时恢复 Idle），防止会话切换或手动压缩期间启动新轮次或并发保活。
     fn lock_idle(&self) -> Option<IdleLock<'_>> {
         let mut st = self.state();
         if st.phase != Phase::Idle || st.has_work() {
             return None;
+        }
+        if let Some(c) = st.keepalive_cancel.take() {
+            c.cancel();
         }
         st.phase = Phase::Delivering;
         Some(IdleLock(self))
@@ -714,7 +721,7 @@ impl Runtime {
         };
         tokio::spawn(async move {
             tokio::time::sleep(wait).await;
-            let (inputs, media, cancel) = {
+            let (inputs, media, cancel, turn_session, turn_epoch) = {
                 let mut st = self.state();
                 if st.timer_gen != gen_ || st.phase != Phase::Debouncing || !st.has_work() {
                     return;
@@ -728,7 +735,7 @@ impl Runtime {
                 inputs.append(&mut st.pending);
                 let media = std::mem::take(&mut st.relay_media);
                 st.media_inflight = media.clone();
-                (inputs, media, c)
+                (inputs, media, c, st.session, st.keepalive_epoch)
             };
             // 单独的任务里跑：即使本轮 panic，也能回到 finish_turn 复位状态，而不是永远卡在“回复中”
             let me = self.clone();
@@ -736,12 +743,18 @@ impl Runtime {
                 Ok(r) => r,
                 Err(e) => Err(anyhow::anyhow!("本轮异常中止：{e}")),
             };
-            self.finish_turn(result, media).await;
+            self.finish_turn(result, media, turn_session, turn_epoch).await;
         });
     }
 
     /// 一轮结束：投递结果，然后回到空闲；期间积累的消息开始新一轮去抖。
-    async fn finish_turn(self: Arc<Self>, mut result: Result<TurnOutcome>, relay_media: Vec<PathBuf>) {
+    async fn finish_turn(
+        self: Arc<Self>,
+        mut result: Result<TurnOutcome>,
+        relay_media: Vec<PathBuf>,
+        turn_session: SessionId,
+        turn_epoch: u64,
+    ) {
         let acked = {
             let mut st = self.state();
             st.phase = Phase::Delivering;
@@ -773,8 +786,12 @@ impl Runtime {
             if let Ok(o) = &result {
                 st.last_usage = o.usage;
                 st.total_usage.add(&o.usage);
-                if o.usage.prompt_tokens > 0 {
-                    st.last_llm_at = Some(Instant::now());
+                if !discard
+                    && st.session == turn_session
+                    && st.keepalive_epoch == turn_epoch
+                    && o.usage.prompt_tokens > 0
+                {
+                    st.last_llm_at = self.kernel.session_last_req(turn_session).or_else(|| Some(Instant::now()));
                 }
             }
             let saved = matches!(&result, Ok(o) if o.inputs_saved);
@@ -798,7 +815,7 @@ impl Runtime {
     }
 
     async fn deliver(&self, result: Result<TurnOutcome>) {
-        let platform = self.platform();
+        let Some(platform) = self.platform.get() else { return };
         let streaming = platform.caps().streaming;
         let o = match result {
             Ok(o) => o,
@@ -910,7 +927,7 @@ impl Runtime {
             return;
         }
         let interval = Duration::from_secs(ka.interval_minutes * 60);
-        let (session, count, cancel) = {
+        let (session, count, epoch, cancel) = {
             let mut st = self.state();
             if st.phase != Phase::Idle
                 || st.has_work()
@@ -922,12 +939,13 @@ impl Runtime {
             }
             let c = CancellationToken::new();
             st.keepalive_cancel = Some(c.clone());
-            (st.session, st.keepalive_count + 1, c)
+            (st.session, st.keepalive_count + 1, st.keepalive_epoch, c)
         };
+        let idle_s = self.kernel.session_idle(session).map(|d| d.as_secs());
         let res = self.keepalive_once(session, cancel.clone()).await;
         let mut st = self.state();
         st.keepalive_cancel = None;
-        if st.session != session || cancel.is_cancelled() {
+        if st.session != session || st.keepalive_epoch != epoch || cancel.is_cancelled() {
             return;
         }
         match res {
@@ -944,6 +962,7 @@ impl Runtime {
                     cached_tokens = u.cached_tokens,
                     hit_pct = %format!("{hit_pct}%"),
                     completion_tokens = u.completion_tokens,
+                    idle_s,
                     "缓存保活完成"
                 );
             }
@@ -973,7 +992,7 @@ impl Runtime {
             cache_key: Some(format!("qya-s-{}", s.id)),
         };
         let comp = spec.provider.complete(req, cancel).await?;
-        let _ = self.kernel.touch_session(s.id);
+        self.kernel.touch_session(s.id);
         Ok(comp.usage)
     }
 
@@ -1078,6 +1097,7 @@ impl Runtime {
                 let c = self.cfg.reload()?;
                 let kit = PersonaKit::load(&c, &self.sup, &self.memory_lock)?;
                 *self.kit.lock().expect("kit 锁中毒") = Arc::new(kit);
+                self.state().reset_keepalive(true);
                 Card::new("✅", "配置与人格资产已重新加载").hint("改动在新会话或 /compact 后生效").build()
             }
         })
@@ -1086,9 +1106,7 @@ impl Runtime {
     /// 停止当前一轮并丢弃待处理缓冲；返回是否确有东西被停止。
     fn stop_current(&self) -> bool {
         let mut st = self.state();
-        if let Some(c) = st.keepalive_cancel.take() {
-            c.cancel();
-        }
+        st.reset_keepalive(true);
         st.timer_gen += 1;
         st.first_pending = None;
         let had_pending = !std::mem::take(&mut st.pending).is_empty();
@@ -1411,7 +1429,7 @@ worker_prompt = '{}'
         );
         let cfg_path = dir.join("qya.toml");
         std::fs::write(&cfg_path, cfg_toml).unwrap();
-        let rt = super::Runtime::open(qya_config::ConfigHandle::open(&cfg_path).unwrap()).await.unwrap();
+        let rt = std::sync::Arc::new(super::Runtime::open(qya_config::ConfigHandle::open(&cfg_path).unwrap()).await.unwrap());
         let s1 = rt.session();
         rt.store().kv_set(&super::kv_snapshot(s1), "S2_FIRST").await.unwrap();
 
@@ -1442,21 +1460,41 @@ worker_prompt = '{}'
         assert_eq!(rt.snapshot(s1).await.unwrap(), "S2_FIRST");
         assert_eq!(rt.store().kv_get(super::KV_PERSONA_SESSION).await.unwrap().as_deref(), Some(s1.to_string().as_str()));
 
-        // 验证保活状态在会话/模型切换与用户消息时正确重置
+        // 验证保活状态在会话/模型切换、重载、/stop 与旧轮次收尾时的重置与代次保护
         let tok = tokio_util::sync::CancellationToken::new();
-        {
+        let old_epoch = {
             let mut st = rt.state();
             st.keepalive_cancel = Some(tok.clone());
             st.keepalive_count = 3;
             st.last_llm_at = Some(std::time::Instant::now());
-        }
+            st.keepalive_epoch
+        };
         let _ = rt.command(qya_command::Command::Model(Some("kimi-for-coding".into()))).await.unwrap();
         {
             let st = rt.state();
             assert!(tok.is_cancelled(), "切换模型应取消进行中的保活");
             assert_eq!(st.keepalive_count, 0);
             assert!(st.last_llm_at.is_none());
+            assert!(st.keepalive_epoch > old_epoch, "代次应自增以拒绝旧轮次写回");
         }
+        // 模拟代次变更前启动的旧轮次收尾：不应重新写入 last_llm_at
+        rt.clone()
+            .finish_turn(
+                Ok(qya_agent::TurnOutcome {
+                    text: String::new(),
+                    usage: qya_core::Usage { prompt_tokens: 100, completion_tokens: 10, cached_tokens: 80, ..Default::default() },
+                    reason: qya_core::StopReason::Cancelled,
+                    media: Vec::new(),
+                    unconsumed: Vec::new(),
+                    inputs_saved: false,
+                    error: None,
+                }),
+                Vec::new(),
+                s1,
+                old_epoch,
+            )
+            .await;
+        assert!(rt.state().last_llm_at.is_none(), "旧代次轮次收尾不得重开保活计时");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

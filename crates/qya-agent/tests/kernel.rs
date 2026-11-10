@@ -255,8 +255,9 @@ async fn tail_is_sent_only_on_trailing_user_and_not_persisted() {
     assert_eq!(reqs[0].cache_key.as_deref(), Some(format!("qya-s-{sid}").as_str()));
     assert_eq!(reqs[0].messages[0].content.len(), 1, "尾注入应合并进文本段，不拆成多个 ContentPart");
     assert_eq!(reqs[0].messages[0].text(), "在吗\n\n【现在 12:00】");
-    // 第 2 步（工具结果回填，以 tool 结尾）：前文的 user 消息保持原文不带 tail，使工具轮缓存前缀与下一轮历史完全一致
-    assert_eq!(reqs[1].messages[0].text(), "在吗");
+    // 第 2 步（工具结果回填）：末尾保持为 tool 消息（不在 tool 后追加 user），且本轮最后一条 user 仍保留相同的 tail
+    assert_eq!(reqs[1].messages.last().unwrap().role, Role::Tool);
+    assert_eq!(reqs[1].messages[0].text(), "在吗\n\n【现在 12:00】");
     let stored: Message = serde_json::from_value(k.store().branch(sid).await.unwrap()[0].payload.clone()).unwrap();
     assert_eq!(stored.text(), "在吗");
 }

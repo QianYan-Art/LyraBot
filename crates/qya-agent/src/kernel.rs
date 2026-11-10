@@ -119,14 +119,33 @@ impl Kernel {
         Self { store, events, cfg, last_req: Arc::new(Mutex::new(BTreeMap::new())) }
     }
 
-    /// 记录会话刚刚完成一次模型请求，返回距该会话上次请求的时间间隔。
-    pub fn touch_session(&self, session: SessionId) -> Option<Duration> {
+    /// 返回距该会话上次模型请求完成的空闲时长，并顺带清理超过 24 小时的陈旧记录。
+    pub fn session_idle(&self, session: SessionId) -> Option<Duration> {
         let now = Instant::now();
-        self.last_req
-            .lock()
-            .expect("last_req 锁中毒")
-            .insert(session, now)
-            .map(|prev| now.saturating_duration_since(prev))
+        let mut map = self.last_req.lock().expect("last_req 锁中毒");
+        map.retain(|_, t| now.saturating_duration_since(*t) < Duration::from_secs(86_400));
+        map.get(&session).map(|prev| now.saturating_duration_since(*prev))
+    }
+
+    /// 记录会话刚刚完成一次模型请求。
+    pub fn touch_session(&self, session: SessionId) {
+        let now = Instant::now();
+        let mut map = self.last_req.lock().expect("last_req 锁中毒");
+        map.retain(|_, t| now.saturating_duration_since(*t) < Duration::from_secs(86_400));
+        map.insert(session, now);
+    }
+
+    /// 查询该会话最近一次完成模型请求的时刻。
+    pub fn session_last_req(&self, session: SessionId) -> Option<Instant> {
+        self.last_req.lock().expect("last_req 锁中毒").get(&session).copied()
+    }
+
+    /// 清理已删除会话的请求时间记录。
+    pub fn forget_sessions(&self, ids: &[SessionId]) {
+        let mut map = self.last_req.lock().expect("last_req 锁中毒");
+        for id in ids {
+            map.remove(id);
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
@@ -207,6 +226,7 @@ impl Kernel {
                 max_tokens: Some(spec.max_output_tokens),
                 cache_key: Some(format!("qya-s-{session}")),
             };
+            let idle_s = self.session_idle(session).map(|d| d.as_secs());
             let completion = match self.stream_once(spec, session, req, &cancel).await {
                 Ok(c) => c,
                 Err(e) if e.kind == ErrorKind::Cancelled => break StopReason::Cancelled,
@@ -220,7 +240,7 @@ impl Kernel {
                     break StopReason::Error;
                 }
             };
-            let idle_s = self.touch_session(session).map(|d| d.as_secs());
+            self.touch_session(session);
             let u = &completion.usage;
             let hit_pct = (u.cached_tokens * 100).checked_div(u.prompt_tokens).unwrap_or(0);
             tracing::info!(
@@ -455,12 +475,12 @@ fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// 把动态尾注入附到末尾的 user 消息（仅当消息列表以 user 结尾时合并进最后一个文本段，不拆成多个 ContentPart；
-/// 工具回填阶段以 tool 结尾时不改写前文的 user 消息，使工具调用轮写入的缓存前缀与下一轮历史完全一致）。
+/// 把动态尾注入合并到最后一条 user 消息的末尾文本段（纯文本消息保持单字符串 content，含图片/视频时追加文本段；
+/// 不在 tool 消息后追加新的 user 消息，且同一轮工具续轮共用同一份 tail，兼顾缓存前缀稳定与当前时间感知）。
 fn with_tail(ctx: Vec<CtxMessage>, tail: Option<&str>) -> Vec<Message> {
     let mut msgs: Vec<Message> = ctx.into_iter().map(|c| c.message).collect();
     if let Some(t) = tail.filter(|t| !t.is_empty())
-        && let Some(m) = msgs.last_mut().filter(|m| m.role == Role::User)
+        && let Some(m) = msgs.iter_mut().rev().find(|m| m.role == Role::User)
     {
         if let Some(ContentPart::Text { text }) = m.content.last_mut() {
             text.push_str("\n\n");
