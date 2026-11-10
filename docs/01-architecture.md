@@ -74,19 +74,19 @@ Release profile：`opt-level=3, lto="fat", codegen-units=1, strip=true, panic="u
 LyraBot/
 ├─ Cargo.toml                     # workspace
 ├─ crates/
-│  ├─ lyrabot-core/               # 共享类型：Message/ContentPart/ToolCall/AgentEvent/Usage、命令输出排版 card
-│  ├─ lyrabot-config/             # TOML + secret 文件装载、ArcSwap 热替换
+│  ├─ lyrabot-core/               # 共享类型：Message/ContentPart/ToolCall/AgentEvent/Usage、记忆文件格式 memory_file、命令输出排版 card
+│  ├─ lyrabot-config/             # TOML + secret 文件装载（types/raw/lib）、ArcSwap 热替换
 │  ├─ lyrabot-llm/                # Provider、kimi-code（Chat Completions）、模型目录、思考等级映射、重试、媒体编码
 │  ├─ lyrabot-store/              # SQLite schema 与迁移、会话树、信箱、发件箱、表达库、记忆候选与修订、检索索引、定时任务、清理
 │  ├─ lyrabot-agent/              # pi 式 Kernel：循环、工具注册表、steer/follow-up 队列、折叠与压缩
-│  ├─ lyrabot-orchestra/          # 子代理：派出/续接/专员、上下文继承、汇报与重启恢复
+│  ├─ lyrabot-orchestra/          # 子代理（types/spec/supervisor/tools）：派出/续接/专员、上下文继承、汇报与重启恢复
 │  ├─ lyrabot-persona/            # 提示词布局、身份装配、Pacer、表情包、说法学习、记忆整理
 │  ├─ lyrabot-tools/              # 内置工具：shell(+rtk)/fs/memory/todo/cron/mail/komari/blog/skills/recall
 │  ├─ lyrabot-plugins/            # 可插拔提供方：image/tts/search/grok，watch_video，/provider 命令
 │  ├─ lyrabot-douyin/             # 抖音外部服务客户端（校验、净化、确认发布与验证码拦截）
 │  ├─ lyrabot-platform/           # Platform trait；qq（官方）、cli
 │  └─ lyrabot-command/            # /命令解析与帮助
-├─ apps/lyrabot/                  # main：配置装载、依赖装配、运行时、聊天命令执行
+├─ apps/lyrabot/                  # main + runtime（主阶段机、commands 命令执行、tasks 周期任务与保活、learning 学习整理）
 ├─ assets/                        # persona/（角色资产）、agents/（执行者提示）、memory_seed/、tools/（邮件 helper）
 ├─ skills/                        # SKILL.md 技能
 ├─ config/lyrabot.example.toml

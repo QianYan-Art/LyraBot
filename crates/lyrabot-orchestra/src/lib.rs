@@ -5,11 +5,14 @@
 //! - 上下文继承：fork（零拷贝继承主对话角色当前分支）/ brief（任务 + 背景说明）/ fresh（空白）；
 //! - 结果以 [`WorkerReport`] 先写入信箱再经通道交回运行时，由主对话角色转述；重启后未确认的汇报与被中断的任务由 [`Supervisor::recover`] 与信箱补投。
 
+mod spec;
 mod supervisor;
 mod tools;
+mod types;
 
-pub use supervisor::{
-    ContextMode, DelegateRequest, ExtrasFn, Notify, ProviderFn, Supervisor, Target, WorkerInfo, WorkerKind, WorkerReport, WorkerStatus,
+pub use supervisor::Supervisor;
+pub use tools::{AgentCtlTool, DelegateTool, render_list};
+pub use types::{
+    ContextMode, DelegateRequest, ExtrasFn, Notify, ProviderFn, Target, WorkerInfo, WorkerKind, WorkerReport, WorkerStatus,
     default_providers,
 };
-pub use tools::{AgentCtlTool, DelegateTool, render_list};

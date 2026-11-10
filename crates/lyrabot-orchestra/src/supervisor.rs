@@ -1,207 +1,24 @@
-use lyrabot_agent::{Kernel, Queues, Tool, ToolRegistry, TurnSpec};
+use crate::spec::build_turn_spec;
+use crate::types::{
+    ContextMode, DelegateRequest, ExtrasFn, HState, Handle, Notify, ProviderFn, Target, WorkerInfo, WorkerKind, WorkerReport,
+    WorkerStatus, clip,
+};
+use lyrabot_agent::{Kernel, ToolRegistry, TurnSpec};
 use lyrabot_config::{Config, ConfigHandle};
 use lyrabot_core::{Effort, Message, SessionId, StopReason};
-use lyrabot_store::{Mail, NewSession, SessionKind, SessionStatus};
-use serde::{Deserialize, Serialize};
+use lyrabot_store::{NewSession, SessionKind, SessionStatus};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-
-/// 按提供方 id 取得模型客户端。运行时传入真实实现，测试传入假实现。
-pub type ProviderFn = Arc<dyn Fn(&Config, &str) -> Result<Arc<dyn lyrabot_llm::Provider>, String> + Send + Sync>;
-
-/// 按执行者身份追加的专属工具（如专员只能写自己的记忆文件）。
-pub type ExtrasFn = Arc<dyn Fn(&Config, &WorkerKind) -> Vec<Arc<dyn Tool>> + Send + Sync>;
-
-/// 默认实现：按配置构造。
-pub fn default_providers() -> ProviderFn {
-    Arc::new(|c: &Config, id: &str| {
-        let p = c.provider(id).ok_or_else(|| format!("提供方 {id} 未配置"))?;
-        lyrabot_llm::build(p).map_err(|e| e.to_string())
-    })
-}
 use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
 /// worker 汇报摘要的上限（字）；完整过程留在 worker 会话里。
 const SUMMARY_LIMIT: usize = 1200;
-/// 需要用户决定的问题上限（字）。
-const QUESTION_LIMIT: usize = 300;
 const INTERRUPTED_SUMMARY: &str = "服务重启时这个任务还没做完，已有进展保存在它的会话里。需要的话用 agent_ctl continue 续接；续接时它会先核对已经做过的部分，不重复外部操作。";
 /// fork 模式下为主对话角色那次 delegate 调用补的工具结果。
 const FORK_PLACEHOLDER: &str = "（这件事已交给后台执行者处理）";
 const FORK_INSTRUCTION: &str = "〔以上是主对话角色与用户的对话，供你了解来龙去脉。从现在起你是后台执行者，不扮演角色，不对用户直接说话，只完成下面的任务并按系统提示写汇报。〕";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContextMode {
-    Fork,
-    Brief,
-    Fresh,
-}
-
-impl ContextMode {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "fork" => Some(Self::Fork),
-            "brief" => Some(Self::Brief),
-            "fresh" => Some(Self::Fresh),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Target {
-    Worker,
-    Specialist(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Notify {
-    /// 完成后立即交给主对话角色转述
-    Relay,
-    /// 只入信箱，等用户下次说话时一并带上
-    Silent,
-}
-
-#[derive(Debug, Clone)]
-pub struct DelegateRequest {
-    /// 发起方（主对话角色）会话
-    pub parent: SessionId,
-    /// 发起方那次 delegate 调用的 id（fork 模式补结果用）
-    pub parent_call_id: String,
-    pub task: String,
-    pub context: ContextMode,
-    pub context_note: Option<String>,
-    pub target: Target,
-    pub model: Option<String>,
-    pub effort: Option<Effort>,
-    pub notify: Notify,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WorkerKind {
-    Worker,
-    Specialist(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WorkerStatus {
-    Queued,
-    Running,
-    Done,
-    /// 本轮结束，等用户对汇报里的问题拍板
-    Waiting,
-    Failed,
-    Cancelled,
-    /// 服务重启时仍在排队或运行
-    Interrupted,
-}
-
-impl WorkerStatus {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Queued => "排队中",
-            Self::Running => "进行中",
-            Self::Done => "已完成",
-            Self::Waiting => "等待决定",
-            Self::Failed => "失败",
-            Self::Cancelled => "已停止",
-            Self::Interrupted => "被中断",
-        }
-    }
-    fn is_active(self) -> bool {
-        matches!(self, Self::Queued | Self::Running)
-    }
-}
-
-/// 交回主对话角色的结果。先写入信箱（`mail` 为信件 id）再投递，确认送达前进程重启也不会丢。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkerReport {
-    #[serde(skip)]
-    pub mail: i64,
-    pub id: SessionId,
-    pub title: String,
-    pub kind: WorkerKind,
-    pub status: WorkerStatus,
-    pub summary: String,
-    /// 需要用户拍板的问题（执行者经 need_decision 提出）
-    #[serde(default)]
-    pub question: Option<String>,
-    pub media: Vec<PathBuf>,
-    pub notify: Notify,
-    pub elapsed_s: u64,
-}
-
-impl WorkerReport {
-    /// 从信箱记录还原（启动时补投未确认的汇报）。
-    pub fn from_mail(m: &Mail) -> Option<Self> {
-        let mut r: Self = serde_json::from_value(m.payload.clone()).ok()?;
-        r.mail = m.id;
-        Some(r)
-    }
-}
-
-/// /agent 与 agent_ctl 展示用的快照。
-#[derive(Debug, Clone)]
-pub struct WorkerInfo {
-    pub id: SessionId,
-    pub kind: WorkerKind,
-    pub title: String,
-    pub model: String,
-    pub effort: String,
-    pub status: WorkerStatus,
-    pub progress: Option<String>,
-    pub elapsed: Option<Duration>,
-}
-
-struct HState {
-    status: WorkerStatus,
-    progress: Option<String>,
-    question: Option<String>,
-    cancel: Option<CancellationToken>,
-    started: Option<Instant>,
-    finished: Option<Duration>,
-    notify: Notify,
-}
-
-pub(crate) struct Handle {
-    pub id: SessionId,
-    pub kind: WorkerKind,
-    pub title: String,
-    queues: Arc<Queues>,
-    state: Mutex<HState>,
-}
-
-impl Handle {
-    fn new(id: SessionId, kind: WorkerKind, title: String, status: WorkerStatus) -> Arc<Self> {
-        Arc::new(Self {
-            id,
-            kind,
-            title,
-            queues: Arc::new(Queues::default()),
-            state: Mutex::new(HState {
-                status,
-                progress: None,
-                question: None,
-                cancel: None,
-                started: None,
-                finished: None,
-                notify: Notify::Relay,
-            }),
-        })
-    }
-    fn st(&self) -> std::sync::MutexGuard<'_, HState> {
-        self.state.lock().expect("worker 状态锁中毒")
-    }
-    pub(crate) fn set_progress(&self, p: String) {
-        self.st().progress = Some(p);
-    }
-    pub(crate) fn set_question(&self, q: &str) {
-        self.st().question = Some(clip(q, QUESTION_LIMIT));
-    }
-}
 
 struct Inner {
     cfg: Arc<ConfigHandle>,
@@ -225,17 +42,6 @@ pub struct Supervisor {
 
 fn tokens_of(m: &Message) -> i64 {
     lyrabot_agent::context::estimate_tokens(m.char_len()) as i64
-}
-
-fn clip(s: &str, n: usize) -> String {
-    let s = s.trim();
-    if s.chars().count() <= n {
-        s.to_owned()
-    } else {
-        let mut t: String = s.chars().take(n).collect();
-        t.push('…');
-        t
-    }
 }
 
 impl Supervisor {
@@ -733,60 +539,7 @@ impl Supervisor {
     /// 执行者一轮的规格：执行者系统提示（+专员专长与记忆）、工具白名单。
     async fn spec(inner: &Inner, h: &Arc<Handle>) -> Result<TurnSpec, String> {
         let c = inner.cfg.get();
-        let o = &c.orchestra;
         let row = inner.kernel.store().session(h.id).await.map_err(|e| e.to_string())?;
-        let p = c.provider(&o.provider).ok_or("编排提供方未配置")?;
-        let info = p.models.get(&row.model).ok_or_else(|| format!("模型 {} 不在目录中", row.model))?;
-        let base = std::fs::read_to_string(&o.worker_prompt)
-            .map_err(|e| format!("读取执行者提示 {} 失败：{e}", o.worker_prompt.display()))?;
-        let mut system = vec![base.trim().to_owned()];
-        let tool_names: Vec<String> = match &h.kind {
-            WorkerKind::Worker => o.worker_tools.clone(),
-            WorkerKind::Specialist(name) => {
-                let s = o.specialists.get(name).ok_or_else(|| format!("专员 {name} 已从配置中移除"))?;
-                let mut extra = format!(
-                    "## 你的身份\n你是专员「{name}」：{}。每次任务使用独立会话，请以当前任务与实际查询结果为准；跨任务需要长期记住的固定流程或环境事实，请参考下方长期记忆或用 memory 工具维护。",
-                    s.description
-                );
-                if let Some(m) = &s.memory {
-                    let path = c.persona.memory_dir.join(m);
-                    if let Ok(text) = std::fs::read_to_string(&path) {
-                        let items: Vec<String> =
-                            text.split("\n§\n").map(str::trim).filter(|e| !e.is_empty()).map(|e| format!("- {}", e.replace('\n', " "))).collect();
-                        if !items.is_empty() {
-                            extra.push_str(&format!("\n\n## 你的长期记忆\n{}", items.join("\n")));
-                        }
-                    }
-                }
-                system.push(extra);
-                if s.tools.is_empty() { o.worker_tools.clone() } else { s.tools.clone() }
-            }
-        };
-        let names: Vec<&str> = tool_names.iter().map(String::as_str).filter(|n| inner.tools.get(n).is_some()).collect();
-        let missing: Vec<&String> = tool_names.iter().filter(|n| inner.tools.get(n).is_none()).collect();
-        if !missing.is_empty() {
-            tracing::warn!(?missing, "配置的工具在本机未注册，已忽略");
-        }
-        let mut tools = inner
-            .tools
-            .select(&names)
-            .map_err(|e| e.to_string())?
-            .with(Arc::new(crate::tools::ReportProgress::new(h.clone())) as Arc<dyn Tool>)
-            .with(Arc::new(crate::tools::NeedDecision::new(h.clone())) as Arc<dyn Tool>);
-        if let Some(extras) = &inner.extras {
-            for t in extras(&c, &h.kind) {
-                tools = tools.with(t);
-            }
-        }
-        Ok(TurnSpec {
-            provider: (inner.providers)(&c, &o.provider)?,
-            model: row.model.clone(),
-            effort: row.effort.parse().ok(),
-            context_window: info.context_length.min(o.context_window),
-            max_output_tokens: info.max_output_tokens,
-            system,
-            tools,
-            tail: None,
-        })
+        build_turn_spec(&c, &row, h, &inner.tools, &inner.providers, inner.extras.as_ref())
     }
 }

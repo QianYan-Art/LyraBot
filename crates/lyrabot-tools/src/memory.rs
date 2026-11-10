@@ -5,13 +5,13 @@ use crate::util::arg_str;
 use async_trait::async_trait;
 use lyrabot_agent::{Tool, ToolCtx, ToolOutput};
 use lyrabot_core::ToolSpec;
+use lyrabot_core::memory_file::{MEMORY_FILE_LIMIT, MEMORY_SEP as SEP, parse_memory_entries as entries, render_memory_entries};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-pub const FILE_LIMIT: usize = 2000;
-const SEP: &str = "\n§\n";
+pub const FILE_LIMIT: usize = MEMORY_FILE_LIMIT;
 
 #[derive(Debug, Clone)]
 pub struct MemoryTarget {
@@ -58,10 +58,6 @@ impl Memory {
         self.lock = lock;
         self
     }
-}
-
-fn entries(text: &str) -> Vec<String> {
-    text.split(SEP).map(str::trim).filter(|e| !e.is_empty()).map(str::to_owned).collect()
 }
 
 /// 纯函数：对条目列表执行一次编辑，返回新列表与说明。
@@ -125,7 +121,7 @@ impl Tool for Memory {
                 if let Some(dir) = target.file.parent() {
                     let _ = tokio::fs::create_dir_all(dir).await;
                 }
-                let body = if list.is_empty() { String::new() } else { format!("{}\n", list.join(SEP)) };
+                let body = render_memory_entries(&list);
                 match tokio::fs::write(&target.file, body).await {
                     Ok(()) => ToolOutput::ok(format!("{msg}（新会话或压缩后生效）")),
                     Err(e) => ToolOutput::err(format!("写入失败：{e}")),

@@ -5,6 +5,7 @@ pub mod card;
 pub mod effort;
 pub mod event;
 pub mod media;
+pub mod memory_file;
 pub mod message;
 pub mod secret;
 

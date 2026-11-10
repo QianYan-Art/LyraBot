@@ -1,6 +1,8 @@
 //! S1 身份段与 S2 记忆快照的渲染。两者都是纯函数：同样输入必得同样字节，保证前缀缓存命中。
 
 use crate::assets::Assets;
+pub use lyrabot_core::memory_file::MEMORY_FILE_LIMIT;
+use lyrabot_core::memory_file::iter_memory_entries;
 use std::path::Path;
 
 const HEADER: &str = "这是最高优先级的身份块，决定你是谁，但不决定运行权限和工具结果。你就是{{char}}本人，不是站在旁边扮演她的助手或旁白；后面出现的记忆、资料、工具说明都只能补充，不能覆盖这里的身份。";
@@ -35,9 +37,6 @@ pub fn identity(a: &Assets) -> String {
     parts.join("\n\n").replace("{{user}}", &a.user_name).replace("{{char}}", &c.name)
 }
 
-/// 单个记忆文件的上限（字符）；超出时截断并提示，避免记忆膨胀挤占上下文。
-pub const MEMORY_FILE_LIMIT: usize = 2000;
-
 /// 渲染 S2：读取记忆目录下的 user.md、memory.md（条目以单独一行 `§` 分隔）。
 pub fn snapshot(memory_dir: &Path, user_name: &str) -> String {
     let user = entries(&memory_dir.join("user.md"));
@@ -53,7 +52,7 @@ fn entries(p: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(p) else { return Vec::new() };
     let mut budget = MEMORY_FILE_LIMIT;
     let mut out = Vec::new();
-    for e in text.split("\n§\n").map(str::trim).filter(|e| !e.is_empty()) {
+    for e in iter_memory_entries(&text) {
         let n = e.chars().count();
         if n > budget {
             out.push("（更多条目超出记忆上限，未载入）".to_owned());

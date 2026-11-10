@@ -7,14 +7,13 @@
 //! - 调用方在写文件前保存修订（整理前后全文），供 `/learn` 查看与撤销。
 
 use crate::MEMORY_FILE_LIMIT;
+pub use lyrabot_core::memory_file::{MEMORY_SEP as SEP, parse_memory_entries as entries, render_memory_entries as render};
 use lyrabot_core::{Effort, Message};
 use lyrabot_llm::{ChatRequest, Provider};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use tokio_util::sync::CancellationToken;
 
-/// 记忆文件中条目的分隔符（单独一行 `§`）。
-pub const SEP: &str = "\n§\n";
 /// 单次整理最多删除的条数，防止误判导致大面积丢失。
 const MAX_REMOVALS: usize = 3;
 /// 单条记忆上限（字）。
@@ -26,14 +25,6 @@ pub const TARGETS: [(&str, char); 2] = [("user", 'u'), ("memory", 'm')];
 /// 按当前用户名生成记忆分类标题。
 pub fn target_label(target: &str, user_name: &str) -> String {
     if target == "user" { format!("关于{user_name}") } else { "约定与共同的事".to_owned() }
-}
-
-pub fn entries(text: &str) -> Vec<String> {
-    text.split(SEP).map(str::trim).filter(|e| !e.is_empty()).map(str::to_owned).collect()
-}
-
-pub fn render(list: &[String]) -> String {
-    if list.is_empty() { String::new() } else { format!("{}\n", list.join(SEP)) }
 }
 
 /// 一条待整理的候选（`id` 为候选在存储中的编号）。

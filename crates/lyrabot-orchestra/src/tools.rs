@@ -1,13 +1,13 @@
-//! 编排相关工具：主对话角色用的 delegate / agent_ctl，执行者用的 report_progress / need_decision。
+//! 主对话角色使用的编排工具：`delegate` 与 `agent_ctl`。
 
-use crate::supervisor::{ContextMode, DelegateRequest, Handle, Notify, Supervisor, Target, WorkerKind};
+use crate::supervisor::Supervisor;
+use crate::types::{ContextMode, DelegateRequest, Notify, Target, WorkerInfo, WorkerKind};
 use async_trait::async_trait;
-use lyrabot_agent::{Concurrency, Tool, ToolCtx, ToolOutput};
+use lyrabot_agent::{Tool, ToolCtx, ToolOutput};
 use lyrabot_config::Config;
 use lyrabot_core::card::Card;
 use lyrabot_core::{Effort, ToolSpec};
 use serde_json::{Value, json};
-use std::sync::Arc;
 
 pub struct DelegateTool {
     sup: Supervisor,
@@ -121,7 +121,7 @@ impl AgentCtlTool {
 }
 
 /// /agent 与 agent_ctl(status) 共用的列表渲染。
-pub fn render_list(list: &[crate::WorkerInfo]) -> String {
+pub fn render_list(list: &[WorkerInfo]) -> String {
     if list.is_empty() {
         return "🤖 目前没有后台任务".into();
     }
@@ -166,88 +166,6 @@ impl Tool for AgentCtlTool {
         match r {
             Ok(t) => ToolOutput::ok(t),
             Err(e) => ToolOutput::err(e),
-        }
-    }
-}
-
-/// 执行者汇报进度；每个执行者一份实例，绑定自己的句柄。
-pub(crate) struct ReportProgress {
-    handle: Arc<Handle>,
-    spec: ToolSpec,
-}
-
-impl ReportProgress {
-    pub(crate) fn new(handle: Arc<Handle>) -> Self {
-        let spec = ToolSpec {
-            name: "report_progress".into(),
-            description: "简短汇报当前进度（一句话），查看后台任务时能看到。长任务每完成一个阶段汇报一次即可。".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {"progress": {"type": "string"}},
-                "required": ["progress"],
-                "additionalProperties": false
-            }),
-        };
-        Self { handle, spec }
-    }
-}
-
-#[async_trait]
-impl Tool for ReportProgress {
-    fn spec(&self) -> &ToolSpec {
-        &self.spec
-    }
-    fn concurrency(&self) -> Concurrency {
-        Concurrency::Shared
-    }
-    async fn call(&self, _ctx: ToolCtx, args: Value) -> ToolOutput {
-        match s(&args, "progress") {
-            Some(p) => {
-                self.handle.set_progress(p.chars().take(100).collect());
-                ToolOutput::ok("已记录")
-            }
-            None => ToolOutput::err("缺少 progress"),
-        }
-    }
-}
-
-/// 执行者提出需要用户拍板的问题；汇报时单独交给主对话角色原样转达。
-pub(crate) struct NeedDecision {
-    handle: Arc<Handle>,
-    spec: ToolSpec,
-}
-
-impl NeedDecision {
-    pub(crate) fn new(handle: Arc<Handle>) -> Self {
-        let spec = ToolSpec {
-            name: "need_decision".into(),
-            description: "只有必须由用户拍板才能继续时调用（例如二选一的方案、要不要执行不可撤回的操作）：写一个具体、能直接回答的问题，可列选项。调用后收尾本轮，汇报里写清已完成的部分，不必重复这个问题。已经被授权的事不要再问。".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {"question": {"type": "string"}},
-                "required": ["question"],
-                "additionalProperties": false
-            }),
-        };
-        Self { handle, spec }
-    }
-}
-
-#[async_trait]
-impl Tool for NeedDecision {
-    fn spec(&self) -> &ToolSpec {
-        &self.spec
-    }
-    fn concurrency(&self) -> Concurrency {
-        Concurrency::Shared
-    }
-    async fn call(&self, _ctx: ToolCtx, args: Value) -> ToolOutput {
-        match s(&args, "question").map(str::trim).filter(|q| !q.is_empty()) {
-            Some(q) => {
-                self.handle.set_question(q);
-                ToolOutput::ok("已记录，会随汇报交回。现在收尾本轮。")
-            }
-            None => ToolOutput::err("缺少 question"),
         }
     }
 }
