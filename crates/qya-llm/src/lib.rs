@@ -12,7 +12,8 @@ pub use error::{ErrorKind, LlmError};
 
 use async_trait::async_trait;
 use qya_core::{Effort, Message, ToolSpec, Usage};
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -27,6 +28,8 @@ pub struct ChatRequest {
     pub tools: Vec<ToolSpec>,
     pub effort: Option<Effort>,
     pub max_tokens: Option<u32>,
+    /// 可选：会话级前缀缓存亲和键（编码为 `prompt_cache_key`）。
+    pub cache_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,11 +85,22 @@ pub trait Provider: Send + Sync {
     }
 }
 
-/// 按配置构造提供方。
+/// 按配置构造或复用提供方（相同 `ProviderConfig` 共享底层 HTTP/TLS 连接池，`/reload` 改动后自动重建）。
 pub fn build(cfg: &qya_config::ProviderConfig) -> Result<Arc<dyn Provider>> {
-    match cfg.transport {
-        qya_config::Transport::ChatCompletions => Ok(Arc::new(ChatCompletionsProvider::new(cfg.clone())?)),
+    type Cache = Mutex<BTreeMap<String, (qya_config::ProviderConfig, Arc<dyn Provider>)>>;
+    static POOL: OnceLock<Cache> = OnceLock::new();
+    let pool = POOL.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut guard = pool.lock().expect("provider pool 锁中毒");
+    if let Some((saved_cfg, p)) = guard.get(&cfg.id)
+        && saved_cfg == cfg
+    {
+        return Ok(p.clone());
     }
+    let p: Arc<dyn Provider> = match cfg.transport {
+        qya_config::Transport::ChatCompletions => Arc::new(ChatCompletionsProvider::new(cfg.clone())?),
+    };
+    guard.insert(cfg.id.clone(), (cfg.clone(), p.clone()));
+    Ok(p)
 }
 
 /// 安装进程级 TLS 加密后端（ring）。重复调用无害。

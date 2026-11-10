@@ -44,7 +44,7 @@ pub struct LlmConfig {
     pub providers: BTreeMap<String, ProviderConfig>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProviderConfig {
     pub id: String,
     pub base_url: String,
@@ -80,7 +80,7 @@ fn default_max_output() -> u32 {
     32_000
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 pub struct Timeouts {
     #[serde(default = "d10")]
     pub connect_s: u64,
@@ -116,9 +116,33 @@ pub struct PersonaConfig {
     /// 表情包目录；默认 `<data_dir>/stickers`
     pub stickers_dir: PathBuf,
     pub pacer: PacerSettings,
+    pub keepalive: KeepaliveSettings,
     pub learner: LearnerSettings,
     /// 唐语歌可直接使用的轻工具（注册表中的名字；人格专属工具另行加入）
     pub tools: Vec<String>,
+}
+
+/// 主会话前缀缓存保活参数（docs/04-persona-memory.md 第 1 节）。
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KeepaliveSettings {
+    /// 距上次模型请求多少分钟发一次保活（设为 0 关闭保活）
+    #[serde(default = "d_ka_interval")]
+    pub interval_minutes: u64,
+    /// 每次用户说话后最多连续保活多少次（设为 0 关闭保活）
+    #[serde(default = "d_ka_max")]
+    pub max_count: u32,
+}
+fn d_ka_interval() -> u64 {
+    18
+}
+fn d_ka_max() -> u32 {
+    9
+}
+impl Default for KeepaliveSettings {
+    fn default() -> Self {
+        Self { interval_minutes: d_ka_interval(), max_count: d_ka_max() }
+    }
 }
 
 /// 表达/黑话学习参数（docs/04-persona-memory.md 第 3 节）。
@@ -501,6 +525,8 @@ struct RawPersona {
     #[serde(default)]
     pacer: PacerSettings,
     #[serde(default)]
+    keepalive: KeepaliveSettings,
+    #[serde(default)]
     learner: LearnerSettings,
     #[serde(default = "d_persona_tools")]
     tools: Vec<String>,
@@ -556,6 +582,7 @@ impl Config {
             memory_dir: raw.persona.memory_dir.as_deref().map(resolve).unwrap_or_else(|| data_dir.join("memory")),
             stickers_dir: raw.persona.stickers_dir.as_deref().map(resolve).unwrap_or_else(|| data_dir.join("stickers")),
             pacer: raw.persona.pacer,
+            keepalive: raw.persona.keepalive,
             learner: raw.persona.learner,
             tools: raw.persona.tools,
             provider: persona_provider,

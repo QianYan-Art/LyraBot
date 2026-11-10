@@ -27,6 +27,8 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料（persona
 
 - S1 渲染顺序：`# 唐语歌` + 身份优先级说明 → 关系默认 → 核心描述 → 性格 → 聊天准则 → 常驻资料 → 示例对话 → 补充设定（角色书常驻条目）→ 能力与边界；`{{user}}/{{char}}` 替换为 阿颜/唐语歌。约 7,600 字；2026-11-08 服务器实测：极短对话首轮输入约 6.9k token，其中固定前缀约 6.1k，后续轮次缓存命中 80–98%。
 - S2 会话创建时生成并冻结在 kv `persona_s2:<session>`，压缩后刷新，保证同一会话前缀字节稳定；记忆改动因此在新会话或压缩后生效。
+- 尾注入位置：仅当消息列表以 `user` 消息结尾时，将尾注入合并进该消息的最后一个文本段（保持单字符串 `content`，不拆成多个 `ContentPart`）；同一轮工具调用回填阶段（消息列表以 `tool` 结尾）不改写前文的 `user` 消息，也不在 `tool` 后追加 `user` 消息，保证工具调用轮建立的缓存前缀与下一轮历史完全一致。
+- 前缀缓存保活（`[persona.keepalive]`）：订阅端点前缀缓存有效期约 20 分钟。主会话在完成模型请求后按 `interval_minutes`（默认 18 分钟）用与正式请求完全相同的前缀（同模型、同思考等级、同系统段、同工具列表、同历史）发送 `max_tokens = 1` 的保活请求续期，结果丢弃不落库；单次用户说话后最多连续保活 `max_count` 次（默认 9 次，约 2.7 小时），之后自动停止直到用户再次说话。用户发消息、切换会话/模型或停止时立即取消进行中的保活请求；设为 0 可关闭。
 - 原 Hermes 的 `skill_view(tangyuge-roleplay)` 改为专用轻工具 `persona_notes(topic)`，条目与用途写在工具说明里。Hermes 的 `SOUL.md`（工作风格）不进入唐语歌提示，留给后台执行者；`MEMORY.md` 的运维流程迁到专员记忆种子（`assets/memory_seed/`）。
 - 唐语歌只用轻工具：`persona.tools` 默认 image_generate、speak、web_search、cron、skill_view、recall，另有人格专属 persona_notes、delegate、agent_ctl、memory、sticker；注册了 watch_video 时自动带上。重活经 delegate 派出（见 `05-orchestra.md`）。
 - 派活时 task 照阿颜的原话写，不自己补充没说的范围或指标，拿不准先问。

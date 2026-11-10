@@ -110,6 +110,17 @@ impl State {
     fn has_work(&self) -> bool {
         !self.pending.is_empty() || self.mail.iter().any(|r| r.notify == Notify::Relay)
     }
+
+    /// 取消正在进行的保活请求并重置保活计数；`clear_timer` 为真时一并清空上次模型请求时间（会话/模型切换后需等新对话再开始保活）。
+    fn reset_keepalive(&mut self, clear_timer: bool) {
+        if let Some(c) = self.keepalive_cancel.take() {
+            c.cancel();
+        }
+        self.keepalive_count = 0;
+        if clear_timer {
+            self.last_llm_at = None;
+        }
+    }
 }
 
 /// 一轮结束时处理带上的汇报：输入已落库则全部确认；否则放回队首，
@@ -157,6 +168,12 @@ struct State {
     inflight: Vec<Relay>,
     /// /stop 发出后为真：被取消那一轮未处理的输入直接丢弃，而不是重新排队
     discard_unconsumed: bool,
+    /// 主会话最近一次完成模型请求（正式对话或保活）的时刻
+    last_llm_at: Option<Instant>,
+    /// 自用户上次说话以来已连续保活的次数
+    keepalive_count: u32,
+    /// 当前进行中的保活请求取消令牌
+    keepalive_cancel: Option<CancellationToken>,
     last_usage: Usage,
     total_usage: Usage,
 }
@@ -306,6 +323,7 @@ impl Runtime {
             return;
         }
         self.clone().spawn_learner();
+        self.clone().spawn_keepalive();
         self.clone().spawn_report_consumer();
         self.clone().spawn_cron();
         self.clone().spawn_media_gc();
@@ -539,7 +557,11 @@ impl Runtime {
             row.model = c.persona.model.clone();
             self.store.update_session(target, Some(row.model.clone()), None, None).await?;
         }
-        self.state().session = target;
+        {
+            let mut st = self.state();
+            st.session = target;
+            st.reset_keepalive(true);
+        }
         Ok(Card::new("✅", &format!("已切回会话 #{target}"))
             .item(format!("{}｜思考 {}", row.model, row.effort))
             .item(format!("旧会话 #{old} 已标为已结束"))
@@ -654,8 +676,12 @@ impl Runtime {
     /// 按当前阶段处置一条消息。`from_user` 为假时（后台结果）不计入阿颜的活跃时间。
     fn on_chat(self: Arc<Self>, msg: Message, from_user: bool) {
         let mut st = self.state();
+        if let Some(c) = st.keepalive_cancel.take() {
+            c.cancel();
+        }
         if from_user {
             st.last_activity = Some(Instant::now());
+            st.keepalive_count = 0;
         }
         match pacer::on_message(st.phase) {
             Disposition::Steer => self.queues.steer(msg),
@@ -747,6 +773,9 @@ impl Runtime {
             if let Ok(o) = &result {
                 st.last_usage = o.usage;
                 st.total_usage.add(&o.usage);
+                if o.usage.prompt_tokens > 0 {
+                    st.last_llm_at = Some(Instant::now());
+                }
             }
             let saved = matches!(&result, Ok(o) if o.inputs_saved);
             let failed = !matches!(&result, Ok(o) if o.reason != StopReason::Error);
@@ -862,6 +891,92 @@ impl Runtime {
         Ok(self.kernel.run_turn(&spec, s.id, inputs, &self.queues, cancel).await?)
     }
 
+    /// 主会话前缀缓存保活循环：每 30 秒检查一次，到达间隔时发 1-token 保活请求续期。
+    fn spawn_keepalive(self: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(30));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                self.keepalive_if_due().await;
+            }
+        });
+    }
+
+    /// 检查主会话是否满足保活条件；满足则用与正式请求完全相同的前缀请求 1 个 token，结果丢弃不落库。
+    async fn keepalive_if_due(&self) {
+        let ka = self.cfg.get().persona.keepalive;
+        if ka.interval_minutes == 0 || ka.max_count == 0 {
+            return;
+        }
+        let interval = Duration::from_secs(ka.interval_minutes * 60);
+        let (session, count, cancel) = {
+            let mut st = self.state();
+            if st.phase != Phase::Idle
+                || st.has_work()
+                || st.keepalive_cancel.is_some()
+                || st.keepalive_count >= ka.max_count
+                || st.last_llm_at.is_none_or(|t| t.elapsed() < interval)
+            {
+                return;
+            }
+            let c = CancellationToken::new();
+            st.keepalive_cancel = Some(c.clone());
+            (st.session, st.keepalive_count + 1, c)
+        };
+        let res = self.keepalive_once(session, cancel.clone()).await;
+        let mut st = self.state();
+        st.keepalive_cancel = None;
+        if st.session != session || cancel.is_cancelled() {
+            return;
+        }
+        match res {
+            Ok(u) => {
+                st.last_llm_at = Some(Instant::now());
+                st.keepalive_count = count;
+                st.total_usage.add(&u);
+                let hit_pct = (u.cached_tokens * 100).checked_div(u.prompt_tokens).unwrap_or(0);
+                tracing::info!(
+                    session,
+                    count,
+                    max = ka.max_count,
+                    prompt_tokens = u.prompt_tokens,
+                    cached_tokens = u.cached_tokens,
+                    hit_pct = %format!("{hit_pct}%"),
+                    completion_tokens = u.completion_tokens,
+                    "缓存保活完成"
+                );
+            }
+            Err(e) => {
+                // 失败也推进计时与计数，避免每 30 秒反复重试消耗额度
+                st.last_llm_at = Some(Instant::now());
+                st.keepalive_count = count;
+                tracing::warn!(session, count, error = %e, "缓存保活请求失败");
+            }
+        }
+    }
+
+    async fn keepalive_once(&self, session: SessionId, cancel: CancellationToken) -> Result<Usage> {
+        let c = self.cfg.get();
+        let s = self.store.session(session).await?;
+        let spec = self.persona_spec(&c, &s, "").await?;
+        let ctx = self.kernel.context(s.id).await?;
+        let mut messages: Vec<Message> = ctx.into_iter().map(|m| m.message).collect();
+        messages.push(Message::user("."));
+        let req = qya_llm::ChatRequest {
+            model: spec.model,
+            system: spec.system,
+            messages,
+            tools: spec.tools.specs(),
+            effort: spec.effort,
+            max_tokens: Some(1),
+            cache_key: Some(format!("qya-s-{}", s.id)),
+        };
+        let comp = spec.provider.complete(req, cancel).await?;
+        let _ = self.kernel.touch_session(s.id);
+        Ok(comp.usage)
+    }
+
     async fn command(&self, cmd: Command) -> Result<String> {
         let c = self.cfg.get();
         Ok(match cmd {
@@ -871,7 +986,11 @@ impl Runtime {
                 self.stop_current();
                 let old = self.session();
                 let id = self.new_persona_session().await?;
-                self.state().session = id;
+                {
+                    let mut st = self.state();
+                    st.session = id;
+                    st.reset_keepalive(true);
+                }
                 self.store.update_session(old, None, None, Some(qya_store::SessionStatus::Closed)).await?;
                 Card::new("✅", &format!("已开启新会话 #{id}"))
                     .item("记忆和关系不变")
@@ -900,6 +1019,7 @@ impl Runtime {
                 let est = qya_agent::context::estimate_messages(&ctx);
                 let compacted = self.kernel.compact(&spec, s.id, &ctx, est, &CancellationToken::new()).await?;
                 self.refresh_snapshot(s.id).await?;
+                self.state().reset_keepalive(true);
                 if compacted {
                     card::ok(format!("已压缩并刷新记忆快照，压缩前约 {} token", tokens(est)))
                 } else {
@@ -921,6 +1041,7 @@ impl Runtime {
                     return Ok(card::warn(format!("模型 {m} 不在模型目录中，发 /model 查看可选模型")));
                 }
                 self.store.update_session(self.session(), Some(m.clone()), None, None).await?;
+                self.state().reset_keepalive(true);
                 card::ok(format!("{}的模型已切换为 {m}", self.kit().persona.name()))
             }
             Command::Effort(None) => {
@@ -936,6 +1057,7 @@ impl Runtime {
             }
             Command::Effort(Some(e)) => {
                 self.store.update_session(self.session(), None, Some(e.to_string()), None).await?;
+                self.state().reset_keepalive(true);
                 let p = c.provider(&c.persona.provider).context("persona provider 未配置")?;
                 Card::new("✅", &format!("思考等级已切换为 {e}"))
                     .item(format!("实际请求参数：{}", p.effort_param(e)))
@@ -964,6 +1086,9 @@ impl Runtime {
     /// 停止当前一轮并丢弃待处理缓冲；返回是否确有东西被停止。
     fn stop_current(&self) -> bool {
         let mut st = self.state();
+        if let Some(c) = st.keepalive_cancel.take() {
+            c.cancel();
+        }
         st.timer_gen += 1;
         st.first_pending = None;
         let had_pending = !std::mem::take(&mut st.pending).is_empty();
@@ -1316,6 +1441,22 @@ worker_prompt = '{}'
         assert_eq!(rt.store().session(s2).await.unwrap().status, qya_store::SessionStatus::Closed);
         assert_eq!(rt.snapshot(s1).await.unwrap(), "S2_FIRST");
         assert_eq!(rt.store().kv_get(super::KV_PERSONA_SESSION).await.unwrap().as_deref(), Some(s1.to_string().as_str()));
+
+        // 验证保活状态在会话/模型切换与用户消息时正确重置
+        let tok = tokio_util::sync::CancellationToken::new();
+        {
+            let mut st = rt.state();
+            st.keepalive_cancel = Some(tok.clone());
+            st.keepalive_count = 3;
+            st.last_llm_at = Some(std::time::Instant::now());
+        }
+        let _ = rt.command(qya_command::Command::Model(Some("kimi-for-coding".into()))).await.unwrap();
+        {
+            let st = rt.state();
+            assert!(tok.is_cancelled(), "切换模型应取消进行中的保活");
+            assert_eq!(st.keepalive_count, 0);
+            assert!(st.last_llm_at.is_none());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

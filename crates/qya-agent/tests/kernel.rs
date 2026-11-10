@@ -243,12 +243,20 @@ async fn compaction_triggers_and_context_uses_summary() {
 }
 
 #[tokio::test]
-async fn tail_is_sent_but_not_persisted() {
-    let p = Fake::new(vec![Message::assistant("嗯")]);
-    let (k, mut spec, sid) = setup(p.clone(), vec![], 100_000).await;
+async fn tail_is_sent_only_on_trailing_user_and_not_persisted() {
+    let t = Sleepy::new("t", 1, Concurrency::Shared);
+    let p = Fake::new(vec![calls(vec![call("1", "t", "{}")]), Message::assistant("嗯")]);
+    let (k, mut spec, sid) = setup(p.clone(), vec![Arc::new(t)], 100_000).await;
     spec.tail = Some("【现在 12:00】".into());
     k.run_turn(&spec, sid, vec![Message::user("在吗")], &Queues::default(), CancellationToken::new()).await.unwrap();
-    assert!(p.reqs()[0].messages[0].text().ends_with("【现在 12:00】"));
+    let reqs = p.reqs();
+    assert_eq!(reqs.len(), 2);
+    // 第 1 步（以 user 结尾）：尾注入合并进同一个 Text ContentPart，且带会话级 cache_key
+    assert_eq!(reqs[0].cache_key.as_deref(), Some(format!("qya-s-{sid}").as_str()));
+    assert_eq!(reqs[0].messages[0].content.len(), 1, "尾注入应合并进文本段，不拆成多个 ContentPart");
+    assert_eq!(reqs[0].messages[0].text(), "在吗\n\n【现在 12:00】");
+    // 第 2 步（工具结果回填，以 tool 结尾）：前文的 user 消息保持原文不带 tail，使工具轮缓存前缀与下一轮历史完全一致
+    assert_eq!(reqs[1].messages[0].text(), "在吗");
     let stored: Message = serde_json::from_value(k.store().branch(sid).await.unwrap()[0].payload.clone()).unwrap();
     assert_eq!(stored.text(), "在吗");
 }

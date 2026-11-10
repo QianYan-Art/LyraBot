@@ -7,7 +7,7 @@
 
 ### 1.1 抽象
 
-`ChatRequest` 只含规范化字段（system 段、messages、tools、model、effort、max_tokens），由传输实现负责编码/解码；当前只有 OpenAI Chat Completions 传输。新增官方接口 = 新增一个传输实现，不动内核。流式事件为文本增量、思考增量、工具调用增量、用量与结束原因。
+`ChatRequest` 只含规范化字段（system 段、messages、tools、model、effort、max_tokens、cache_key），由传输实现负责编码/解码；当前只有 OpenAI Chat Completions 传输。新增官方接口 = 新增一个传输实现，不动内核。流式事件为文本增量、思考增量、工具调用增量、用量与结束原因。
 
 ### 1.2 kimi-code 适配要点（2026-11-07 实测，11-08 复核模态）
 
@@ -15,7 +15,7 @@
 - 当前 key 可用模型（`/models`）：`kimi-for-coding`（显示名 K2.8 Preview，1M）、`kimi-for-coding-highspeed`（256K）、`k3`（1M）、`k3-256k`（256K）、`k3.1-pro`（1M）、`k3.1-pro-highspeed`（1M，2 倍用量）。全部 `supports_thinking_type=only`（思考恒开）。
 - 思考等级：参数名 `reasoning_effort`，只接受 `low/high/max`。配置 `effort_map`：low→low、medium→high、high→high、xhigh→max、max→max。不存在"关闭思考"。
 - 思考回放：带工具调用的 assistant 消息回放时携带模型返回的真实 `reasoning_content`；缺失时补单个空格，不伪造内容。
-- 缓存：命中数在 `usage.prompt_tokens_details.cached_tokens`。不把五小时额度窗口当缓存时间。
+- 缓存与连接复用：命中数在 `usage.prompt_tokens_details.cached_tokens`。`qya_llm::build` 按 `ProviderConfig` 缓存复用 `Provider` 实例及其底层 HTTP/TLS 连接池（`/reload` 配置变更后自动重建）；内核按会话携带稳定的 `prompt_cache_key`（`qya-s-<session>`），每次模型请求完成时记录 `prompt_tokens`、`cached_tokens`、命中率与距该会话上次请求的间隔 `idle_s`。不把五小时额度窗口当缓存时间。
 - 自检：`/models` 返回的 `context_length`、模态、effort 可选值用于 `qya --check` 比对配置与可用列表。
 - 模态：`k3-256k` 输入只有文字与图片（`supports_video_in=false`）；`kimi-for-coding`、`kimi-for-coding-highspeed`、`k3`、`k3.1-pro` 系列支持视频。视频以 `{"type":"video_url","video_url":{"url":"data:video/mp4;base64,…"}}` 发送，服务器实测通过（2 秒测试视频 566 输入 token）。
 - 媒体编码按目标模型在模型目录中的 `vision` / `video` 能力处理：本地 `file://` 图片（≤10 MB）与视频（≤20 MB）在请求时才转为 data URI；模型不支持视频、或视频超限时不发画面，改为一句提示“需要了解内容时用 watch_video 查看 <路径>”（见 `06-tools-plugins.md` 第 2 节）。

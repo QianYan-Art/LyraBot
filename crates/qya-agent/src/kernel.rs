@@ -8,7 +8,7 @@ use futures_util::future::join_all;
 use qya_core::{AgentEvent, ContentPart, Effort, Message, Role, SessionId, StopReason, ToolCall, Usage};
 use qya_llm::{ChatRequest, ErrorKind, LlmError, Provider, StreamEvent};
 use qya_store::{EntryKind, Store};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -109,12 +109,24 @@ pub struct Kernel {
     store: Store,
     events: broadcast::Sender<AgentEvent>,
     cfg: KernelConfig,
+    /// 各会话最近一次完成模型请求的时刻（用于计算并记录请求间隔）。
+    last_req: Arc<Mutex<BTreeMap<SessionId, Instant>>>,
 }
 
 impl Kernel {
     pub fn new(store: Store, cfg: KernelConfig) -> Self {
         let (events, _) = broadcast::channel(1024);
-        Self { store, events, cfg }
+        Self { store, events, cfg, last_req: Arc::new(Mutex::new(BTreeMap::new())) }
+    }
+
+    /// 记录会话刚刚完成一次模型请求，返回距该会话上次请求的时间间隔。
+    pub fn touch_session(&self, session: SessionId) -> Option<Duration> {
+        let now = Instant::now();
+        self.last_req
+            .lock()
+            .expect("last_req 锁中毒")
+            .insert(session, now)
+            .map(|prev| now.saturating_duration_since(prev))
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
@@ -193,6 +205,7 @@ impl Kernel {
                 tools: spec.tools.specs(),
                 effort: spec.effort,
                 max_tokens: Some(spec.max_output_tokens),
+                cache_key: Some(format!("qya-s-{session}")),
             };
             let completion = match self.stream_once(spec, session, req, &cancel).await {
                 Ok(c) => c,
@@ -207,6 +220,19 @@ impl Kernel {
                     break StopReason::Error;
                 }
             };
+            let idle_s = self.touch_session(session).map(|d| d.as_secs());
+            let u = &completion.usage;
+            let hit_pct = (u.cached_tokens * 100).checked_div(u.prompt_tokens).unwrap_or(0);
+            tracing::info!(
+                session,
+                model = %spec.model,
+                prompt_tokens = u.prompt_tokens,
+                cached_tokens = u.cached_tokens,
+                hit_pct = %format!("{hit_pct}%"),
+                completion_tokens = u.completion_tokens,
+                idle_s,
+                "模型请求完成"
+            );
             usage.add(&completion.usage);
             last_prompt_tokens = completion.usage.prompt_tokens + completion.usage.completion_tokens;
             self.emit(AgentEvent::Usage { session, usage: completion.usage });
@@ -392,6 +418,7 @@ impl Kernel {
             tools: Vec::new(),
             effort: Some(Effort::Low),
             max_tokens: Some(6000),
+            cache_key: None,
         };
         let c = spec.provider.complete(req, cancel.clone()).await?;
         let summary = context::render_compaction(&c.message.text());
@@ -428,13 +455,19 @@ fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// 把动态尾注入附到最后一条 user 消息（仅本次请求，不落库）。
+/// 把动态尾注入附到末尾的 user 消息（仅当消息列表以 user 结尾时合并进最后一个文本段，不拆成多个 ContentPart；
+/// 工具回填阶段以 tool 结尾时不改写前文的 user 消息，使工具调用轮写入的缓存前缀与下一轮历史完全一致）。
 fn with_tail(ctx: Vec<CtxMessage>, tail: Option<&str>) -> Vec<Message> {
     let mut msgs: Vec<Message> = ctx.into_iter().map(|c| c.message).collect();
     if let Some(t) = tail.filter(|t| !t.is_empty())
-        && let Some(m) = msgs.iter_mut().rev().find(|m| m.role == Role::User)
+        && let Some(m) = msgs.last_mut().filter(|m| m.role == Role::User)
     {
-        m.content.push(ContentPart::text(format!("\n\n{t}")));
+        if let Some(ContentPart::Text { text }) = m.content.last_mut() {
+            text.push_str("\n\n");
+            text.push_str(t);
+        } else {
+            m.content.push(ContentPart::text(t));
+        }
     }
     msgs
 }

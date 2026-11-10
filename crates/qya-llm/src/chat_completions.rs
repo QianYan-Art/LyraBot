@@ -65,6 +65,9 @@ impl ChatCompletionsProvider {
         if let Some(m) = req.max_tokens {
             body["max_tokens"] = json!(m);
         }
+        if let Some(k) = req.cache_key.as_deref().filter(|k| !k.is_empty()) {
+            body["prompt_cache_key"] = Value::String(k.to_owned());
+        }
         body
     }
 

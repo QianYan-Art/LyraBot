@@ -51,6 +51,10 @@ effort = "low"
 assets_dir = "persona"
 # memory_dir = "data/memory"   # 默认 <data_dir>/memory
 
+[persona.keepalive]
+interval_minutes = 18          # 距上次模型请求多少分钟发一次 1-token 保活续期（设为 0 关闭）
+max_count = 9                  # 用户说话后最多连续保活次数（约 2.7 小时，设为 0 关闭）
+
 # 多代理编排（docs/05-orchestra.md）
 [orchestra]
 default_model = "kimi-for-coding"

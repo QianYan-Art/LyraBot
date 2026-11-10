@@ -183,6 +183,7 @@ pub async fn learn(
         tools: Vec::new(),
         effort: Some(effort),
         max_tokens: Some(4000),
+        cache_key: None,
     };
     let c = provider.complete(req, cancel).await?;
     Ok(parse(&c.message.text()))

@@ -76,6 +76,7 @@ impl WatchVideo {
             tools: Vec::new(),
             effort: Some(Effort::Low),
             max_tokens: Some(4000),
+            cache_key: None,
         };
         let out = provider.complete(req, cancel.clone()).await.map_err(|e| format!("看视频失败：{e}"))?;
         let text = out.message.text();

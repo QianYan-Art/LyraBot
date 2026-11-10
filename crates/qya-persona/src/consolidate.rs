@@ -231,6 +231,7 @@ pub async fn consolidate(
         tools: Vec::new(),
         effort: Some(effort),
         max_tokens: Some(4000),
+        cache_key: None,
     };
     let reply = provider.complete(req, cancel).await?.message.text();
     let Some(ops) = parse_ops(&reply) else {

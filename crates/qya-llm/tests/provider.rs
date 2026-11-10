@@ -31,13 +31,30 @@ async fn retries_5xx_then_streams_and_maps_effort() {
         .respond_with(ResponseTemplate::new(503)).up_to_n_times(1).mount(&server).await;
     Mock::given(method("POST")).and(path("/chat/completions"))
         .and(header("authorization", "Bearer k"))
-        .and(body_partial_json(serde_json::json!({"reasoning_effort": "high", "stream": true})))
+        .and(body_partial_json(serde_json::json!({"reasoning_effort": "high", "stream": true, "prompt_cache_key": "qya-s-1"})))
         .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(SSE))
         .mount(&server).await;
     let p = qya_llm::ChatCompletionsProvider::new(cfg(&server.uri(), "k")).unwrap();
-    let req = ChatRequest { model: "m".into(), messages: vec![Message::user("hi")], effort: Some(Effort::Medium), ..Default::default() };
+    let req = ChatRequest {
+        model: "m".into(),
+        messages: vec![Message::user("hi")],
+        effort: Some(Effort::Medium),
+        cache_key: Some("qya-s-1".into()),
+        ..Default::default()
+    };
     let c = p.complete(req, CancellationToken::new()).await.unwrap();
     assert_eq!(c.message.text(), "ok");
+}
+
+#[test]
+fn build_reuses_client_until_config_changes() {
+    let c1 = cfg("http://127.0.0.1:9", "k1");
+    let p1 = qya_llm::build(&c1).unwrap();
+    let p2 = qya_llm::build(&c1).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&p1, &p2), "相同配置应复用同一 Provider 实例与连接池");
+    let c2 = cfg("http://127.0.0.1:9", "k2");
+    let p3 = qya_llm::build(&c2).unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&p1, &p3), "配置变更后应重建 Provider");
 }
 
 #[tokio::test]
@@ -76,6 +93,7 @@ async fn live_tool_call_roundtrip() {
         tools: vec![tool],
         effort: Some(Effort::Low),
         max_tokens: Some(2000),
+        cache_key: None,
     };
     let c1 = p.complete(req.clone(), CancellationToken::new()).await.unwrap();
     assert!(!c1.message.tool_calls.is_empty(), "模型未调用工具：{:?}", c1.message);
