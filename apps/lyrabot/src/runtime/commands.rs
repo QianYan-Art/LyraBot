@@ -448,6 +448,12 @@ worker_prompt = '{}'
             )
             .await;
         assert!(rt.state().last_llm_at.is_none(), "旧代次轮次收尾不得重开保活计时");
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(rt);
+        for _ in 0..20 {
+            if std::fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }

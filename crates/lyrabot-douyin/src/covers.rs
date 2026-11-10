@@ -193,6 +193,7 @@ mod tests {
         std::fs::write(root.join("ep02/ep02_9x16.png"), png(100, 100)).unwrap();
         assert!(saved_sources(&root, "ep02").is_err(), "比例不在允许范围内应报错");
         assert!(saved_sources(&root, "../x").is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -211,5 +212,6 @@ mod tests {
         let mut bad = cover.clone();
         bad[0]["previews"][0]["jpeg_base64"] = json!(b(jpeg(100, 100)));
         assert!(decode_covers(&bad, None, &cache).is_err(), "预览尺寸不符");
+        let _ = std::fs::remove_dir_all(&cache);
     }
 }

@@ -37,7 +37,22 @@ fn wav() -> Vec<u8> {
     v
 }
 
-fn host(base: &str) -> (Host, std::path::PathBuf) {
+struct TempDir(std::path::PathBuf);
+
+impl std::ops::Deref for TempDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn host(base: &str) -> (Host, TempDir) {
     let dir = std::env::temp_dir().join(format!("lyrabot-plugins-{}-{}", std::process::id(), base.len() + rand()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("k.txt"), "k").unwrap();
@@ -85,7 +100,7 @@ key_file = "yb.txt"
 "#
     );
     std::fs::write(dir.join("lyrabot.toml"), cfg).unwrap();
-    (Host::new(Arc::new(ConfigHandle::open(dir.join("lyrabot.toml")).unwrap())), dir)
+    (Host::new(Arc::new(ConfigHandle::open(dir.join("lyrabot.toml")).unwrap())), TempDir(dir))
 }
 
 fn rand() -> usize {
@@ -118,7 +133,7 @@ async fn image_error_in_200_is_failure() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"error": {"message": "image_model_unavailable"}})))
         .mount(&s)
         .await;
-    let (h, _) = host(&s.uri());
+    let (h, _d) = host(&s.uri());
     let out = ImageGenerate::new(h).call(ctx(), json!({"prompt": "x"})).await;
     assert!(out.is_error && out.text.contains("image_model_unavailable"), "{}", out.text);
 }
@@ -132,7 +147,7 @@ async fn speak_validates_wav() {
         .respond_with(ResponseTemplate::new(200).set_body_bytes(wav()))
         .mount(&s)
         .await;
-    let (h, _) = host(&s.uri());
+    let (h, _d) = host(&s.uri());
     let sp = Speak::new(h.clone());
     let out = sp.call(ctx(), json!({"text": "早安", "scene": "温柔"})).await;
     assert!(!out.is_error && out.media[0].extension().unwrap() == "wav", "{}", out.text);
@@ -141,7 +156,7 @@ async fn speak_validates_wav() {
     let mut cut = wav();
     cut.truncate(60);
     Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_bytes(cut)).mount(&bad).await;
-    let (h2, _) = host(&bad.uri());
+    let (h2, _d2) = host(&bad.uri());
     let out = Speak::new(h2).call(ctx(), json!({"text": "早安"})).await;
     assert!(out.is_error && out.text.contains("截断"), "{}", out.text);
 }
@@ -157,7 +172,7 @@ async fn yuanbao_search_uses_first_line_key() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"Response": {"Pages": [page], "RequestId": "r"}})))
         .mount(&s)
         .await;
-    let (h, _) = host(&s.uri());
+    let (h, _d) = host(&s.uri());
     let out = WebSearch::new(h.clone()).call(ctx(), json!({"query": "测试", "site": "a.b"})).await;
     assert_eq!(out.text, "1. 标题（站点 · 2026-11-01）\nhttps://a.b\n摘要");
 
@@ -166,7 +181,7 @@ async fn yuanbao_search_uses_first_line_key() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"Response": {"Error": {"Code": "AuthFailure", "Message": "bad key"}}})))
         .mount(&e)
         .await;
-    let (h3, _) = host(&e.uri());
+    let (h3, _d3) = host(&e.uri());
     let out = WebSearch::new(h3).call(ctx(), json!({"query": "x"})).await;
     assert!(out.is_error && out.text.contains("AuthFailure"));
 }

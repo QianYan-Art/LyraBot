@@ -12,10 +12,30 @@ fn ctx() -> ToolCtx {
     ToolCtx { session: 1, call_id: "c".into(), cancel: CancellationToken::new() }
 }
 
-fn tmp(name: &str) -> PathBuf {
+struct TempDir(PathBuf);
+
+impl std::ops::Deref for TempDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        for _ in 0..20 {
+            if std::fs::remove_dir_all(&self.0).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+fn tmp(name: &str) -> TempDir {
     let d = std::env::temp_dir().join(format!("lyrabot-tools-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
-    d
+    TempDir(d)
 }
 
 /// Windows 上 `bash` 可能解析到 WSL 的 bash.exe（会改写参数里的 $()），优先用 Git Bash。

@@ -117,7 +117,8 @@ mod tests {
 
     #[test]
     fn scan_and_pick() {
-        let s = Sticker::scan(&dir()).unwrap();
+        let d = dir();
+        let s = Sticker::scan(&d).unwrap();
         assert!(s.spec.description.contains("cry、shy"));
         for _ in 0..10 {
             let p = s.pick("shy", None).unwrap();
@@ -126,5 +127,6 @@ mod tests {
         assert!(s.pick("shy", Some("pinkcat")).unwrap().to_str().unwrap().contains("pinkcat"));
         assert!(s.pick("angry", None).is_none());
         assert!(Sticker::scan(Path::new("Z:/definitely/missing")).is_none());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

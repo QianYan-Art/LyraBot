@@ -315,15 +315,16 @@ impl Drop for RequestingGuard<'_> {
 mod tests {
     use super::*;
 
-    fn dy() -> Arc<Douyin> {
+    fn dy() -> (Arc<Douyin>, PathBuf) {
         let dir = std::env::temp_dir().join(format!("lyrabot-dy-lib-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        Douyin::new(&lyrabot_config::DouyinConfig { socket: dir.join("no.sock"), saved_covers_dir: dir.join("saved"), cache_dir: dir.join("cache") })
+        let d = Douyin::new(&lyrabot_config::DouyinConfig { socket: dir.join("no.sock"), saved_covers_dir: dir.join("saved"), cache_dir: dir.join("cache") });
+        (d, dir)
     }
 
     #[test]
     fn intercept_rules() {
-        let d = dy();
+        let (d, dir) = dy();
         assert!(matches!(d.intercept("晚上吃什么", &[]), Intercept::Pass));
         // 没有发码窗口时，六位数字照常交给主对话角色
         assert!(matches!(d.intercept("123456", &[]), Intercept::Pass));
@@ -342,11 +343,12 @@ mod tests {
         assert!(matches!(d.intercept("654321", &[]), Intercept::Handled { work: Some(_), .. }));
         assert!(d.binding.lock().unwrap().as_ref().unwrap().processing, "接管后进入处理中，防止重复提交");
         assert!(matches!(d.intercept("111111", &[]), Intercept::Handled { work: None, .. }));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn inbound_image_registry() {
-        let d = dy();
+        let (d, lib_dir) = dy();
         let dir = std::env::temp_dir().join(format!("lyrabot-dy-img-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let a = dir.join("a.jpg");
@@ -357,5 +359,7 @@ mod tests {
         let id = c[0]["image_id"].as_str().unwrap();
         assert_eq!(d.registered_image(id), Some(a));
         assert_eq!(d.registered_image("0".repeat(32).as_str()), None);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&lib_dir);
     }
 }

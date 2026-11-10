@@ -55,6 +55,13 @@ struct Env {
     fake: Arc<Fake>,
     reports: mpsc::UnboundedReceiver<WorkerReport>,
     persona: i64,
+    dir: std::path::PathBuf,
+}
+
+impl Drop for Env {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 async fn env(max_concurrent: usize, delay_ms: u64) -> Env {
@@ -102,7 +109,7 @@ memory = "ops.md"
     let (tx, reports) = mpsc::unbounded_channel();
     let sup = Supervisor::new(handle, kernel, ToolRegistry::default(), tx, Arc::new(move |_, _| Ok(f2.clone() as Arc<dyn Provider>)));
     let persona = store.create_session(NewSession { model: "m1".into(), effort: "low".into(), ..Default::default() }).await.unwrap();
-    Env { sup, store, fake, reports, persona }
+    Env { sup, store, fake, reports, persona, dir }
 }
 
 fn rand_suffix() -> String {

@@ -317,5 +317,6 @@ mod tests {
         assert_eq!(gc_dir(&d, std::time::Duration::ZERO, &keep), 0, "仍被引用的文件保留");
         assert_eq!(gc_dir(&d, std::time::Duration::ZERO, &none), 1);
         assert!(!d.join("inbox/new.jpg").exists());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

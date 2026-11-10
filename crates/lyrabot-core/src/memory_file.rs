@@ -26,10 +26,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip() {
+    fn roundtrip_and_edge_cases() {
         let list = parse_memory_entries("甲\n§\n乙\n§\n\n");
         assert_eq!(list, vec!["甲", "乙"]);
         assert_eq!(render_memory_entries(&list), "甲\n§\n乙\n");
         assert_eq!(render_memory_entries(&[]), "");
+
+        // 边界：空串、仅含空白与分隔符、首尾多余空白、条目内部换行保留
+        assert!(parse_memory_entries("").is_empty());
+        assert!(parse_memory_entries("  \n§\n  \n§\n ").is_empty());
+        let multiline = parse_memory_entries("  第一行\n第二行  \n§\n   \n§\n单行");
+        assert_eq!(multiline, vec!["第一行\n第二行", "单行"]);
+
+        // 边界：iter_memory_entries 惰性借用，take(1) 只取首条
+        let mut it = iter_memory_entries("首条\n§\n次条\n§\n末条");
+        assert_eq!(it.next(), Some("首条"));
     }
 }

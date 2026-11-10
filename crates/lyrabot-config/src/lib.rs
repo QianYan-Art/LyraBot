@@ -207,6 +207,7 @@ model = "k3-256k"
         assert_eq!(c.data_dir, d.join("data"));
         assert_eq!(c.persona.memory_dir, d.join("data").join("memory"));
         assert!(!format!("{c:?}").contains("sk-secret-value"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -219,6 +220,7 @@ model = "k3-256k"
         std::fs::write(&p, "not = [valid").unwrap();
         assert!(h.reload().is_err());
         assert_eq!(h.get().provider("kimi-code").unwrap().api_key.expose(), "k2");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -228,5 +230,6 @@ model = "k3-256k"
         let t = std::fs::read_to_string(&p).unwrap().replace("model = \"k3-256k\"", "model = \"nope\"");
         std::fs::write(&p, t).unwrap();
         assert!(matches!(Config::load(&p), Err(ConfigError::Invalid(_))));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

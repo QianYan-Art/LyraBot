@@ -1,7 +1,7 @@
 # 人格层：提示词、节奏、学习与记忆
 
 记录日期：2026-11-07（2026-11-09 自 `01-architecture.md` 拆出整理，2026-11-10 命名统一为 LyraBot）
-范围：`lyrabot-persona` 与运行时中主对话角色相关的部分（`apps/lyrabot/src/runtime.rs`、`runtime/learning.rs`）。
+范围：`lyrabot-persona` 与运行时中主对话角色相关的部分（`apps/lyrabot/src/runtime.rs`、`runtime/tasks.rs`、`runtime/learning.rs`）。
 
 ## 1. 提示词布局（缓存友好）
 

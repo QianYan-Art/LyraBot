@@ -115,6 +115,7 @@ async fn gateway_and_send_contract() {
     ws2.close(Some(CloseFrame { code: 4914u16.into(), reason: "sandbox".into() })).await.unwrap();
     let res = tokio::time::timeout(Duration::from_secs(5), runner).await.expect("致命关闭后应停止").unwrap();
     assert!(res.is_err());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
@@ -223,4 +224,5 @@ async fn deferred_survives_restart_and_flushes_on_inbound() {
     assert_eq!(left.len(), 2, "{left:?}");
     assert!(left[0].payload["media"].as_str().unwrap().ends_with(".png") && left[1].payload["text"] == "后台结果三");
     runner.abort();
+    let _ = std::fs::remove_file(&img);
 }

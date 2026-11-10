@@ -446,6 +446,7 @@ mod tests {
         let v = encode_message(&m, Caps::ALL);
         assert!(v["content"][0]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
         assert_eq!(v["content"][1]["type"], "text");
+        let _ = std::fs::remove_file(&p);
     }
 
     #[test]

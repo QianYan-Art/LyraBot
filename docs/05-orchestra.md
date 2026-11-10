@@ -1,7 +1,7 @@
 # 多代理编排
 
 记录日期：2026-11-07（2026-11-09 自 `01-architecture.md` 拆出整理，2026-11-10 命名统一为 LyraBot）
-范围：`lyrabot-orchestra`（`Supervisor`、`delegate`、`agent_ctl`、`report_progress`、`need_decision`）与运行时的汇报交付。
+范围：`lyrabot-orchestra`（`types ← spec ← supervisor ← tools` 单向模块：`Supervisor`、`delegate`、`agent_ctl`、`report_progress`、`need_decision`）与运行时的汇报交付（`apps/lyrabot/src/runtime/tasks.rs`）。
 
 ## 1. 概念
 

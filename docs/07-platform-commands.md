@@ -1,7 +1,7 @@
 # 平台层与聊天命令
 
 记录日期：2026-11-07（2026-11-09 自 `01-architecture.md` 拆出整理，2026-11-10 命名统一为 LyraBot）
-范围：`lyrabot-platform`（QQ 官方、CLI）、`lyrabot-command`（命令解析与帮助）与运行时的命令执行。
+范围：`lyrabot-platform`（QQ 官方、CLI）、`lyrabot-command`（命令解析与帮助）与运行时的命令执行（`apps/lyrabot/src/runtime/commands.rs`）。
 
 ## 1. 平台接口
 

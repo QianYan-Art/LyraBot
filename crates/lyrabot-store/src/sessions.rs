@@ -414,6 +414,13 @@ mod tests {
         s.kv_set("a", "1").await.unwrap();
         s.kv_set("a", "2").await.unwrap();
         assert_eq!(s.kv_get("a").await.unwrap().as_deref(), Some("2"));
+        drop(s);
+        for _ in 0..20 {
+            if std::fs::remove_dir_all(&dir).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[tokio::test]

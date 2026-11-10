@@ -81,4 +81,5 @@ fn snapshot_entries_limit_and_empty() {
     let sys = p.system(&s);
     assert_eq!(sys.len(), 2);
     assert_eq!(sys[0], p.identity());
+    let _ = std::fs::remove_dir_all(&dir);
 }
