@@ -105,8 +105,11 @@ memory = "ops.md"
     Env { sup, store, fake, reports, persona }
 }
 
-fn rand_suffix() -> u128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+fn rand_suffix() -> String {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let s = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{n}-{s}")
 }
 
 fn req(persona: i64, task: &str, context: ContextMode, target: Target) -> DelegateRequest {
@@ -172,24 +175,35 @@ async fn brief_and_model_validation() {
 }
 
 #[tokio::test]
-async fn specialist_keeps_session_memory_and_queues() {
+async fn specialist_uses_fresh_session_per_task_while_keeping_memory_and_serial_queue() {
     let mut e = env(3, 150).await;
     let a1 = e.sup.delegate(req(e.persona, "任务一", ContextMode::Fork, Target::Specialist("ops".into()))).await.unwrap();
     assert!(a1.contains("fork 不适用"), "{a1}");
     let a2 = e.sup.delegate(req(e.persona, "任务二", ContextMode::Brief, Target::Specialist("ops".into()))).await.unwrap();
     assert!(a2.contains("排在"), "{a2}");
-    let r = next(&mut e.reports).await;
-    assert_eq!(r.status, WorkerStatus::Done);
-    // 同一会话里先后处理了两项任务（第二项通过 follow-up）
+    let r1 = next(&mut e.reports).await;
+    let r2 = next(&mut e.reports).await;
+    assert_eq!(r1.status, WorkerStatus::Done);
+    assert_eq!(r2.status, WorkerStatus::Done);
+    assert_ne!(r1.id, r2.id, "每次派给专员的新任务应使用独立的新会话");
+    assert_eq!(e.store.session(r1.id).await.unwrap().status, SessionStatus::Archived);
+    assert_eq!(e.store.session(r2.id).await.unwrap().status, SessionStatus::Archived);
+
     let reqs = e.fake.requests.lock().unwrap().clone();
     assert_eq!(reqs.len(), 2);
     assert_eq!(reqs[0].model, "m2");
-    assert!(reqs[0].system[1].contains("常驻专员「ops」") && reqs[0].system[1].contains("- 博客同步用固定脚本"));
-    assert!(reqs[1].messages.iter().any(|m| m.text().contains("任务一")), "专员保有之前的上下文");
-    // 再派一次：复用同一个专员会话
-    e.sup.delegate(req(e.persona, "任务三", ContextMode::Brief, Target::Specialist("ops".into()))).await.unwrap();
-    let r2 = next(&mut e.reports).await;
-    assert_eq!(r2.id, r.id);
+    assert!(reqs[0].system[1].contains("专员「ops」") && reqs[0].system[1].contains("- 博客同步用固定脚本"));
+    assert!(
+        !reqs[1].messages.iter().any(|m| m.text().contains("任务一")),
+        "专员新任务不应携带上一次任务的对话历史"
+    );
+
+    // 针对第一次任务明确续接追问时，仍在 r1.id 原会话上带着任务一上下文运行
+    e.sup.continue_worker(r1.id, "追问任务一细节", e.persona).await.unwrap();
+    let r3 = next(&mut e.reports).await;
+    assert_eq!(r3.id, r1.id);
+    let reqs = e.fake.requests.lock().unwrap().clone();
+    assert!(reqs[2].messages.iter().any(|m| m.text().contains("任务一")), "明确续接某次任务时保留该任务上下文");
 }
 
 #[tokio::test]
@@ -244,8 +258,10 @@ async fn report_is_mailed_and_restart_recovers_interrupted() {
     assert_eq!((restored.id, restored.status, restored.summary.clone()), (r.id, WorkerStatus::Done, r.summary.clone()));
     e.store.ack_mail(vec![r.mail]).await.unwrap();
 
-    // 模拟进程在执行中退出：运行标记残留，任务已写进会话
+    // 模拟进程在执行中退出：运行标记残留，任务已写进会话；同时存在旧版遗留的闲置 active 专员会话与 specialist:ops kv 键
     let lost = e.store.create_session(NewSession { kind: Some(SessionKind::Worker), name: Some("发周报".into()), model: "m1".into(), effort: "high".into(), ..Default::default() }).await.unwrap();
+    let legacy_spec = e.store.create_session(NewSession { kind: Some(SessionKind::Specialist), name: Some("ops".into()), model: "m2".into(), effort: "high".into(), ..Default::default() }).await.unwrap();
+    e.store.kv_set("specialist:ops", &legacy_spec.to_string()).await.unwrap();
     e.store.begin_run(lost, e.persona, vec![]).await.unwrap();
     assert_eq!(e.sup.recover().await.unwrap(), 1);
     assert_eq!(e.sup.recover().await.unwrap(), 0, "只报告一次");
@@ -253,6 +269,8 @@ async fn report_is_mailed_and_restart_recovers_interrupted() {
     let r = WorkerReport::from_mail(&mail[0]).unwrap();
     assert_eq!((r.id, r.status, r.title.as_str()), (lost, WorkerStatus::Interrupted, "发周报"));
     assert_eq!(e.store.session(lost).await.unwrap().status, SessionStatus::Archived);
+    assert_eq!(e.store.session(legacy_spec).await.unwrap().status, SessionStatus::Archived, "旧版遗留的闲置专员会话自动归档");
+    assert_eq!(e.store.kv_get("specialist:ops").await.unwrap(), None, "旧版 specialist:* kv 键自动清理");
 }
 
 #[tokio::test]
@@ -287,17 +305,17 @@ async fn continuation_uses_spare_slot_when_full() {
 }
 
 #[tokio::test]
-async fn queued_message_for_busy_specialist_runs_another_turn() {
-    let mut e = env(3, 400).await;
+async fn queued_task_for_busy_specialist_runs_serially_in_own_session() {
+    let mut e = env(3, 300).await;
     e.sup.delegate(req(e.persona, "第一件事", ContextMode::Fresh, Target::Specialist("ops".into()))).await.unwrap();
-    // 第一轮还在跑：再派的任务排进追问队列（同时落库）；无论被本轮内核取走还是在收尾时剩下，都会被处理
     tokio::time::sleep(Duration::from_millis(50)).await;
     let ack = e.sup.delegate(req(e.persona, "第二件事", ContextMode::Brief, Target::Specialist("ops".into()))).await.unwrap();
     assert!(ack.contains("排在"), "{ack}");
-    let mut texts = Vec::new();
-    while !texts.iter().any(|t: &String| t.contains("第二件事")) {
-        texts.push(next(&mut e.reports).await.summary);
-    }
+    let r1 = next(&mut e.reports).await;
+    let r2 = next(&mut e.reports).await;
+    assert!(r1.summary.contains("第一件事"), "{}", r1.summary);
+    assert!(r2.summary.contains("第二件事"), "{}", r2.summary);
+    assert_ne!(r1.id, r2.id);
     assert_eq!(e.sup.running(), 0);
 }
 

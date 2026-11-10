@@ -387,6 +387,8 @@ pub struct OrchestraConfig {
     pub default_effort: Effort,
     /// 同时运行的后台执行者上限（worker + 专员）
     pub max_concurrent: usize,
+    /// 后台执行者（worker 与专员）上下文窗口上限（默认 131072，即 128K）
+    pub context_window: u64,
     /// 执行者系统提示文件
     pub worker_prompt: PathBuf,
     /// 任务型 worker 可用的工具名
@@ -417,6 +419,8 @@ struct RawOrchestra {
     default_effort: Effort,
     #[serde(default = "d_concurrent")]
     max_concurrent: usize,
+    #[serde(default = "d_orchestra_window")]
+    context_window: u64,
     worker_prompt: PathBuf,
     #[serde(default)]
     worker_tools: Vec<String>,
@@ -431,6 +435,9 @@ fn d_worker_effort() -> Effort {
 }
 fn d_concurrent() -> usize {
     3
+}
+fn d_orchestra_window() -> u64 {
+    131_072
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -593,6 +600,7 @@ impl Config {
             default_model: ro.default_model,
             default_effort: ro.default_effort,
             max_concurrent: ro.max_concurrent,
+            context_window: ro.context_window,
             worker_prompt: resolve(&ro.worker_prompt),
             worker_tools: ro.worker_tools,
             specialists: ro.specialists,
@@ -700,6 +708,9 @@ impl Config {
         }
         if o.max_concurrent == 0 {
             return Err(ConfigError::Invalid("orchestra.max_concurrent 至少为 1".into()));
+        }
+        if o.context_window == 0 {
+            return Err(ConfigError::Invalid("orchestra.context_window 必须大于 0".into()));
         }
         let pc = &self.persona.pacer;
         if pc.max_segments == 0 || pc.debounce_ms > pc.max_wait_ms {

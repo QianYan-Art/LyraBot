@@ -129,7 +129,8 @@ pub fn render_list(list: &[crate::WorkerInfo]) -> String {
     for w in list.iter().take(12) {
         let who = match &w.kind {
             WorkerKind::Worker => format!("任务：{}", w.title),
-            WorkerKind::Specialist(n) => format!("专员 {n}"),
+            WorkerKind::Specialist(n) if w.title.is_empty() || w.title == *n => format!("专员 {n}"),
+            WorkerKind::Specialist(n) => format!("专员 {n}：{}", w.title),
         };
         let mut head = format!("#{}｜{}", w.id, w.status.label());
         if let Some(e) = w.elapsed {

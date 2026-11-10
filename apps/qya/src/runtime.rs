@@ -515,7 +515,8 @@ impl Runtime {
             ("persona", "closed") => closed_lbl.as_str(),
             ("worker", "active") => "后台任务进行中",
             ("worker", "archived") => "后台任务已归档",
-            ("specialist", _) => "常驻专员",
+            ("specialist", "active") => "专员任务进行中",
+            ("specialist", "archived") => "专员任务已归档",
             _ => "其他",
         };
         c.section("合计");
@@ -1272,7 +1273,8 @@ fn model_info<'a>(c: &'a Config, model: &str) -> Result<&'a ModelInfo> {
 fn relay_text(r: &WorkerReport, user_name: &str) -> String {
     let who = match &r.kind {
         WorkerKind::Worker => format!("后台 #{}「{}」", r.id, r.title),
-        WorkerKind::Specialist(n) => format!("专员 {n}（#{}）", r.id),
+        WorkerKind::Specialist(n) if r.title.is_empty() || r.title == *n => format!("专员 {n}（#{}）", r.id),
+        WorkerKind::Specialist(n) => format!("专员 {n}（#{}「{}」）", r.id, r.title),
     };
     let mut s = format!("〔后台结果：{who}{}，用时 {} 秒〕\n{}", r.status.label(), r.elapsed_s, r.summary);
     if let Some(q) = &r.question {

@@ -50,16 +50,31 @@ fn encode(input: Vec<(serde_json::Value, i64)>) -> Result<Vec<(String, i64)>> {
 }
 
 impl Store {
-    /// 追加任务输入（`(消息 JSON, token 估算)`，按顺序接在当前叶子后）、打上运行标记并清空插话队列，同一事务。
+    /// 追加任务输入（`(消息 JSON, token 估算)`，按顺序接在当前叶子后）、打上运行标记（同时切回 active）并清空插话队列，同一事务。
     pub async fn begin_run(&self, worker: SessionId, owner: SessionId, input: Vec<(serde_json::Value, i64)>) -> Result<()> {
         let rows = encode(input)?;
         self.call(move |c| {
             let tx = c.transaction()?;
             append_messages(&tx, worker, &rows)?;
-            tx.execute("UPDATE sessions SET run_owner=?2 WHERE id=?1", params![worker, owner])?;
+            tx.execute("UPDATE sessions SET run_owner=?2, status='active' WHERE id=?1", params![worker, owner])?;
             tx.execute("DELETE FROM run_queue WHERE worker=?1", [worker])?;
             tx.commit()?;
             Ok(())
+        })
+        .await
+    }
+
+    /// 启动恢复收尾时调用：把所有不带运行标记但仍处于 active 状态的后台/专员会话归档，并清理旧版 specialist:* kv 键。
+    pub async fn archive_idle_workers(&self) -> Result<usize> {
+        self.call(|c| {
+            let tx = c.transaction()?;
+            let n = tx.execute(
+                "UPDATE sessions SET status='archived' WHERE kind IN ('worker', 'specialist') AND status='active' AND run_owner IS NULL",
+                [],
+            )?;
+            tx.execute("DELETE FROM kv WHERE key LIKE 'specialist:%'", [])?;
+            tx.commit()?;
+            Ok(n)
         })
         .await
     }

@@ -122,22 +122,32 @@ pub fn estimate_messages(msgs: &[CtxMessage]) -> u64 {
     msgs.iter().map(|m| estimate_tokens(m.message.char_len())).sum()
 }
 
-/// 选择压缩切分点：保留尾部约 `keep_tokens`，且切分点必须落在 user 消息上，
-/// 保证工具调用与其结果不会被拆开。返回保留部分在 `msgs` 中的起始下标。
+/// 选择压缩切分点：保留尾部约 `keep_tokens`，优先落在 user 消息上；
+/// 若没有后续 user 消息（如后台单次任务的长工具循环已超过 `keep_tokens`），
+/// 则回退到 assistant 工具轮次起点（`i >= 2`），保证工具调用与其结果不会被拆开。
 pub fn split_point(msgs: &[CtxMessage], keep_tokens: u64) -> Option<usize> {
     let mut acc = 0;
-    let mut candidate = None;
+    let mut user_cand = None;
     for (i, m) in msgs.iter().enumerate().rev() {
         acc += estimate_tokens(m.message.char_len());
-        if m.message.role == Role::User && m.entry.is_some() {
-            candidate = Some(i);
+        if m.message.role == Role::User && m.entry.is_some() && i > 0 {
+            user_cand = Some(i);
             if acc >= keep_tokens {
                 break;
             }
         }
     }
-    // 至少要有可压缩的前缀
-    candidate.filter(|&i| i > 0)
+    if user_cand.is_some() {
+        return user_cand;
+    }
+    let mut acc = 0;
+    for (i, m) in msgs.iter().enumerate().rev() {
+        acc += estimate_tokens(m.message.char_len());
+        if i >= 2 && m.message.role == Role::Assistant && m.entry.is_some() && acc >= keep_tokens {
+            return Some(i);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -209,7 +219,7 @@ mod tests {
             Message::user("一".repeat(100)),
             Message::assistant("二".repeat(100)),
             Message::user("三".repeat(100)),
-            call,
+            call.clone(),
             Message::tool_result("x", "四".repeat(100), false),
             Message::assistant("五"),
         ]
@@ -218,6 +228,19 @@ mod tests {
         .map(|(i, m)| CtxMessage { entry: Some(i as i64), message: m })
         .collect();
         assert_eq!(split_point(&msgs, 50), Some(2));
+        // 只有开头一条 user 消息（单次后台任务多轮工具调用）时，回退到 assistant 轮次边界切分，不拆散 call 与 tool_result
+        let single_user_loop: Vec<CtxMessage> = [
+            Message::user("任务：排查日志".repeat(20)),
+            call.clone(),
+            Message::tool_result("x", "第一轮工具输出".repeat(30), false),
+            call,
+            Message::tool_result("x", "第二轮工具输出".repeat(30), false),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, m)| CtxMessage { entry: Some(i as i64), message: m })
+        .collect();
+        assert_eq!(split_point(&single_user_loop, 50), Some(3));
         // 保留量超过全部内容时，没有可压缩前缀
         assert_eq!(split_point(&msgs[2..], 1_000_000), None);
     }

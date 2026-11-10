@@ -210,6 +210,8 @@ struct Inner {
     sem: Arc<Semaphore>,
     /// 给阿颜续接已有任务预留的额外名额：并发占满时，人的追问不必排在新任务后面
     spare: Arc<Semaphore>,
+    /// 同一专员的任务串行互斥锁：每次新任务用独立会话，但同一专员不并发执行
+    specialist_locks: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
     workers: Mutex<BTreeMap<SessionId, Arc<Handle>>>,
     reports: mpsc::UnboundedSender<WorkerReport>,
     providers: ProviderFn,
@@ -223,10 +225,6 @@ pub struct Supervisor {
 
 fn tokens_of(m: &Message) -> i64 {
     qya_agent::context::estimate_tokens(m.char_len()) as i64
-}
-
-fn kv_specialist(name: &str) -> String {
-    format!("specialist:{name}")
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -256,6 +254,7 @@ impl Supervisor {
                 tools,
                 sem: Arc::new(Semaphore::new(n)),
                 spare: Arc::new(Semaphore::new(1)),
+                specialist_locks: Mutex::new(BTreeMap::new()),
                 workers: Mutex::new(BTreeMap::new()),
                 reports,
                 providers,
@@ -272,6 +271,22 @@ impl Supervisor {
 
     fn workers(&self) -> std::sync::MutexGuard<'_, BTreeMap<SessionId, Arc<Handle>>> {
         self.inner.workers.lock().expect("workers 锁中毒")
+    }
+
+    fn specialist_lock(inner: &Inner, name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        inner
+            .specialist_locks
+            .lock()
+            .expect("specialist_locks 锁中毒")
+            .entry(name.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    fn is_specialist_busy(&self, name: &str) -> bool {
+        self.workers()
+            .values()
+            .any(|h| matches!(&h.kind, WorkerKind::Specialist(n) if n == name) && h.st().status.is_active())
     }
 
     /// 校验并解析模型与思考等级。
@@ -305,6 +320,8 @@ impl Supervisor {
         }
         let note = req.context_note.as_deref().map(str::trim).filter(|n| !n.is_empty());
         let mut downgraded = false;
+
+        let mut busy_specialist = false;
 
         let (handle, input, cancel) = match &req.target {
             Target::Worker => {
@@ -344,38 +361,26 @@ impl Supervisor {
                 if req.context == ContextMode::Fork {
                     downgraded = true;
                 }
-                let id = match store.kv_get(&kv_specialist(name)).await.map_err(err)?.and_then(|v| v.parse().ok()) {
-                    Some(id) if store.session(id).await.is_ok() => id,
-                    _ => {
-                        let id = store
-                            .create_session(NewSession {
-                                kind: Some(SessionKind::Specialist),
-                                name: Some(name.clone()),
-                                model: model.clone(),
-                                effort: effort.to_string(),
-                                ..Default::default()
-                            })
-                            .await
-                            .map_err(err)?;
-                        store.kv_set(&kv_specialist(name), &id.to_string()).await.map_err(err)?;
-                        id
-                    }
-                };
-                store.update_session(id, Some(model.clone()), Some(effort.to_string()), None).await.map_err(err)?;
+                busy_specialist = self.is_specialist_busy(name);
+                let id = store
+                    .create_session(NewSession {
+                        kind: Some(SessionKind::Specialist),
+                        name: Some(name.clone()),
+                        parent_session: Some(req.parent),
+                        fork_entry: None,
+                        model: model.clone(),
+                        effort: effort.to_string(),
+                    })
+                    .await
+                    .map_err(err)?;
                 let body = match note {
-                    Some(n) => format!("新任务：{task}\n\n背景：{n}"),
-                    None => format!("新任务：{task}"),
+                    Some(n) => format!("任务：{task}\n\n背景：{n}"),
+                    None => format!("任务：{task}"),
                 };
-                let h = self
-                    .workers()
-                    .entry(id)
-                    .or_insert_with(|| Handle::new(id, WorkerKind::Specialist(name.clone()), name.clone(), WorkerStatus::Done))
-                    .clone();
-                let msg = Message::user(body);
-                let Some(cancel) = self.enqueue_or_claim(&h, &msg, false, req.notify, req.parent).await else {
-                    return Ok(format!("专员 {name} 正在忙，任务已排在它手头的活之后（#{id}）"));
-                };
-                (h, vec![msg], cancel)
+                let h = Handle::new(id, WorkerKind::Specialist(name.clone()), clip(task, 30), WorkerStatus::Done);
+                let cancel = Self::claim(&mut h.st(), req.notify);
+                self.workers().insert(id, h.clone());
+                (h, vec![Message::user(body)], cancel)
             }
         };
         let id = handle.id;
@@ -385,8 +390,13 @@ impl Supervisor {
             Target::Specialist(n) => format!("专员 {n}（#{id}）"),
         };
         let mut msg = format!("已交给{who}（模型 {model}，思考 {effort}）。结果出来后会以〔后台结果〕交回给你。");
+        if busy_specialist
+            && let Target::Specialist(n) = &req.target
+        {
+            msg.push_str(&format!("专员 {n} 正在忙，新任务已排在它手头的活之后（#{id}）。"));
+        }
         if downgraded {
-            msg.push_str("专员有自己的长期会话，fork 不适用，已按 brief 处理。");
+            msg.push_str("专员使用独立会话，fork 不适用，已按 brief 处理。");
         }
         Ok(msg)
     }
@@ -480,9 +490,7 @@ impl Supervisor {
                 SessionKind::Specialist => WorkerKind::Specialist(row.name.clone().unwrap_or_default()),
                 _ => WorkerKind::Worker,
             };
-            if kind == WorkerKind::Worker {
-                store.update_session(it.worker, None, None, Some(SessionStatus::Archived)).await.map_err(|e| e.to_string())?;
-            }
+            store.update_session(it.worker, None, None, Some(SessionStatus::Archived)).await.map_err(|e| e.to_string())?;
             let restored = store.restore_queue(it.worker).await.map_err(|e| e.to_string())?;
             if restored == 0 && !it.marked {
                 continue;
@@ -508,6 +516,10 @@ impl Supervisor {
         }
         if !lost.is_empty() {
             tracing::warn!(count = lost.len(), "发现上次退出时被中断的后台任务");
+        }
+        let archived_legacy = store.archive_idle_workers().await.map_err(|e| e.to_string())?;
+        if archived_legacy > 0 {
+            tracing::info!(count = archived_legacy, "已归档旧版遗留的闲置后台/专员会话");
         }
         Ok(lost.len())
     }
@@ -646,6 +658,16 @@ impl Supervisor {
     async fn run(inner: &Inner, h: &Arc<Handle>, cancel: CancellationToken, priority: bool) -> WorkerReport {
         let started = Instant::now();
         let outcome: Result<qya_agent::TurnOutcome, String> = async {
+            let _spec_guard = match &h.kind {
+                WorkerKind::Specialist(name) => {
+                    let lock = Self::specialist_lock(inner, name);
+                    Some(tokio::select! {
+                        g = lock.lock_owned() => g,
+                        _ = cancel.cancelled() => return Err("排队时被停止".to_owned()),
+                    })
+                }
+                WorkerKind::Worker => None,
+            };
             let _permit = tokio::select! {
                 p = inner.sem.clone().acquire_owned() => p.map_err(|e| e.to_string())?,
                 p = inner.spare.clone().acquire_owned(), if priority => p.map_err(|e| e.to_string())?,
@@ -691,9 +713,7 @@ impl Supervisor {
             (st.question.take(), st.notify)
         };
         let status = if status == WorkerStatus::Done && question.is_some() { WorkerStatus::Waiting } else { status };
-        if h.kind == WorkerKind::Worker {
-            let _ = inner.kernel.store().update_session(h.id, None, None, Some(SessionStatus::Archived)).await;
-        }
+        let _ = inner.kernel.store().update_session(h.id, None, None, Some(SessionStatus::Archived)).await;
         let elapsed = started.elapsed();
         tracing::info!(id = h.id, status = status.label(), secs = elapsed.as_secs(), "后台任务结束");
         WorkerReport {
@@ -724,7 +744,10 @@ impl Supervisor {
             WorkerKind::Worker => o.worker_tools.clone(),
             WorkerKind::Specialist(name) => {
                 let s = o.specialists.get(name).ok_or_else(|| format!("专员 {name} 已从配置中移除"))?;
-                let mut extra = format!("## 你的身份\n你是常驻专员「{name}」：{}。你有自己的长期会话，之前处理过的事可以直接参考。", s.description);
+                let mut extra = format!(
+                    "## 你的身份\n你是专员「{name}」：{}。每次任务使用独立会话，请以当前任务与实际查询结果为准；跨任务需要长期记住的固定流程或环境事实，请参考下方长期记忆或用 memory 工具维护。",
+                    s.description
+                );
                 if let Some(m) = &s.memory {
                     let path = c.persona.memory_dir.join(m);
                     if let Ok(text) = std::fs::read_to_string(&path) {
@@ -759,7 +782,7 @@ impl Supervisor {
             provider: (inner.providers)(&c, &o.provider)?,
             model: row.model.clone(),
             effort: row.effort.parse().ok(),
-            context_window: info.context_length,
+            context_window: info.context_length.min(o.context_window),
             max_output_tokens: info.max_output_tokens,
             system,
             tools,

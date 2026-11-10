@@ -6,7 +6,7 @@
 ## 1. 概念
 
 - **Worker（任务型）**：一个任务派一个；完成后归档，会话保留，可通过 `/agent <id> <话>` 或唐语歌的 `agent_ctl(continue)` 续接。
-- **Specialist（常驻专员）**：在配置中定义（默认 `ops` 运维：邮件/服务器/博客/流量日报；`creator` 创作：抖音/封面/生图）。长期保有自己的会话与记忆文件，自动压缩，跨天保留；派给专员的任务排进它的队列。
+- **Specialist（专员）**：在配置中定义（默认 `ops` 运维：邮件/服务器/博客/流量日报；`creator` 创作：抖音/封面/生图）。长期保有自己的专属工具白名单与工作记忆文件（`ops.md`、`creator.md`），但**每次新派任务（`delegate`）同样创建独立的新会话**（避免旧任务输出污染新任务判断或跨冷却期重传历史上下文），完成后标为已归档（`archived`），支持按任务编号追问续接与 `/gc` 清理；派给同一专员的并发任务通过专员互斥锁串行排队。
 - 唐语歌只做轻活；工具输出留在执行者会话，不进入唐语歌的上下文。
 
 ## 2. delegate 工具
@@ -41,7 +41,7 @@
 
 ## 5. 配置与命令
 
-- 配置 `[orchestra]`：`default_model`（kimi-for-coding）、`default_effort`（high）、`max_concurrent`、`worker_prompt`、`worker_tools`、`[orchestra.specialists.<名>]`（description、model、effort、tools、memory）。专员不写 model/effort 时跟随默认值；现网唐语歌为 `k3-256k`/low，执行者与 ops、creator 专员均为 `kimi-for-coding`/high（2026-11-08 起）。
+- 配置 `[orchestra]`：`default_model`（kimi-for-coding）、`default_effort`（high）、`max_concurrent`、`context_window`（默认 `131072` 即 128K，为主会话 256K 的一半，用于限制后台 worker 与专员单次任务的上下文窗口上限，与 `[agent] compaction_keep_tokens = 20000` 配合；子代理不设缓存保活）、`worker_prompt`、`worker_tools`、`[orchestra.specialists.<名>]`（description、model、effort、tools、memory）。专员不写 model/effort 时跟随默认值；现网唐语歌为 `k3-256k`/low，执行者与 ops、creator 专员均为 `kimi-for-coding`/high（2026-11-08 起）。
 - 命令：`/agent` 或 `/agent list`（列表）、`/agent <id>`（详情 + 最近回复）、`/agent <id> stop`、`/agent <id> <话>`（运行中插话，已结束续接）。
 - 定时任务的 `task` 动作也经 delegate 派出（brief，并注明阿颜此刻不一定在线）。
 

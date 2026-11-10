@@ -1,7 +1,7 @@
 //! 会话清理与统计（/sessions、/gc、每周自动清理）。
 //!
-//! 可清理：已结束（closed）的唐语歌历史会话、已归档（archived）的后台任务会话，且最后更新早于截止时间。
-//! 永不清理：调用方指定保留的会话（当前会话）、进行中的会话、常驻专员。
+//! 可清理：已结束（closed）的唐语歌历史会话、已归档（archived）的后台任务与专员任务会话，且最后更新早于截止时间。
+//! 永不清理：调用方指定保留的会话（当前会话）、进行中的会话。
 //! 会话之间可能共享历史（fork 的条目指向父会话条目、parent_session 外键），
 //! 只有不再被任何保留会话引用的候选才会删除，反复收缩到不动点。
 
@@ -54,11 +54,12 @@ impl Store {
                 let tx = c.transaction()?;
                 let mut cand: HashSet<SessionId> = {
                     let mut st = tx.prepare(
-                        "SELECT id FROM sessions WHERE updated_at < ?1 AND (
-                            (kind='persona' AND status='closed') OR (kind='worker' AND status='archived'))
-                         -- 还有未确认汇报的两端、运行中任务的收件会话都要保留
+                        "SELECT id FROM sessions WHERE updated_at < ?1 AND run_owner IS NULL AND (
+                            (kind='persona' AND status='closed') OR (kind IN ('worker', 'specialist') AND status='archived'))
+                         -- 还有未确认汇报的两端、运行中任务的收件会话、或有插话队列残留的会话都要保留
                          AND id NOT IN (SELECT to_session FROM mailbox UNION SELECT from_session FROM mailbox
-                                        UNION SELECT run_owner FROM sessions WHERE run_owner IS NOT NULL)",
+                                        UNION SELECT run_owner FROM sessions WHERE run_owner IS NOT NULL
+                                        UNION SELECT worker FROM run_queue UNION SELECT owner FROM run_queue)",
                     )?;
                     st.query_map([cutoff], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
                 };
@@ -215,6 +216,8 @@ mod tests {
             s.create_session(sess(SessionKind::Specialist)).await.unwrap(),
         );
         s.post_report(w_mail, old_persona, json!({"summary": "未确认"})).await.unwrap();
+        // 已归档的专员任务被续接（begin_run）时，即使调用方 keep 快照未包含它，GC 也不会误删
+        s.update_session(w_run, None, None, Some(SessionStatus::Archived)).await.unwrap();
         s.begin_run(w_run, owner, vec![]).await.unwrap();
         for id in [old_persona, owner] {
             s.update_session(id, None, None, Some(SessionStatus::Closed)).await.unwrap();
@@ -247,16 +250,18 @@ mod tests {
         s.append(w2, EntryKind::Message, json!({"role":"user","content":[]}), 1).await.unwrap();
         let cur = s.create_session(sess(SessionKind::Persona)).await.unwrap();
         let spec = s.create_session(sess(SessionKind::Specialist)).await.unwrap();
+        let spec_done = s.create_session(sess(SessionKind::Specialist)).await.unwrap();
         s.update_session(p1, None, None, Some(SessionStatus::Closed)).await.unwrap();
         s.update_session(w1, None, None, Some(SessionStatus::Archived)).await.unwrap();
         s.update_session(w2, None, None, Some(SessionStatus::Archived)).await.unwrap();
+        s.update_session(spec_done, None, None, Some(SessionStatus::Archived)).await.unwrap();
         s.kv_set(&format!("persona_s2:{p1}"), "x").await.unwrap();
-        for id in [p1, w1, cur, spec] {
+        for id in [p1, w1, cur, spec, spec_done] {
             age(&s, id, 40).await;
         }
-        // w2 仍新、仍引用 p1 → p1 不能删；w1 可删
+        // w2 仍新、仍引用 p1 → p1 不能删；w1 与已归档的 spec_done 可删；进行中的 spec 保留
         let r = s.gc_sessions(30, vec![cur]).await.unwrap();
-        assert_eq!(r.deleted_ids, vec![w1]);
+        assert_eq!(r.deleted_ids, vec![w1, spec_done]);
         assert_eq!(r.kept_referenced, 1);
         assert!(s.session(w2).await.is_ok() && s.session(p1).await.is_ok() && s.session(spec).await.is_ok());
         assert_eq!(s.branch(w2).await.unwrap().len(), 2, "保留会话的分叉历史完整");

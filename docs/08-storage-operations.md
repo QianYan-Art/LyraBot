@@ -22,7 +22,7 @@
 | `quota` | QQ 主动消息额度计数 |
 | `kv` | 杂项状态（当前人格会话、记忆快照、学习进度、检索检查点、QQ 会话、上次清理时间等） |
 
-- 清理：`/gc [天数]` 与每周一次的自动清理删除已结束且超过 N 天的会话（默认 30 天），连同其条目、信件、插话、检索索引与 kv；当前会话、排队或运行中的执行者、常驻专员、被较新会话引用的历史与还有未确认汇报的会话保留。删除较多时执行 `wal_checkpoint(TRUNCATE)` 与 `VACUUM`。
+- 清理：`/gc [天数]` 与每周一次的自动清理删除已结束且超过 N 天的会话及已归档的后台任务/专员任务会话（默认 30 天），连同其条目、信件、插话、检索索引与 kv；当前会话、排队或运行中的执行者/专员任务、被较新会话引用的历史与还有未确认汇报的会话保留（长期记忆文件独立存放于 `<memory_dir>`，不受会话 GC 影响）。删除较多时执行 `wal_checkpoint(TRUNCATE)` 与 `VACUUM`。
 - 媒体：`<media_dir>` 每小时检查一次，删除 24 小时前的文件，跳过未确认汇报、发件箱与发送中引用的文件。
 - 服务器文件布局：程序 `/opt/qya/bin/qya`（`qya.prev` 为上一版）、资产与文档 `/opt/qya/{persona,agents,skills,tools,docs}`、部署提交号 `/opt/qya/VERSION`；配置 `/etc/qya/qya.toml`、凭据 `/etc/qya/secrets/*`（属主 tangyuge，0600）；数据 `/var/lib/qya/{qya.db,memory,media,stickers,workspace}`；日志进 journald，shell 审计在 `/var/log/qya/audit.jsonl`（达到 5 MB 自动轮转为 `.1`）。
 

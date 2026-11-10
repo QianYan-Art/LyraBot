@@ -60,6 +60,7 @@ max_count = 9                  # 用户说话后最多连续保活次数（约 2
 default_model = "kimi-for-coding"
 default_effort = "high"
 max_concurrent = 3
+context_window = 131072        # 后台执行者（worker 与专员）上下文窗口上限（128K，主会话的一半）
 worker_prompt = "agents/worker.md"
 worker_tools = ["shell", "fs_read", "fs_write", "fs_patch", "fs_search", "todo", "skill_view", "web_search", "grok_search", "grok_fetch", "image_generate"]
 
