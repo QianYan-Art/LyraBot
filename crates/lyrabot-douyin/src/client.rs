@@ -1,4 +1,4 @@
-//! 与 hermes-douyin 服务的 Unix socket 通信：一行 JSON 请求，一行 JSON 响应。
+//! 与 lyrabot-douyin 服务的 Unix socket 通信：一行 JSON 请求，一行 JSON 响应。
 //! 登录类：{"action": "status"|"login", "recover"?}；内容类：{"action":"content","request":{...}}。
 //! 只读请求（login 状态、list、job）在连接错误时重试一次；写请求从不重发。
 

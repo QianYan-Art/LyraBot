@@ -1,4 +1,4 @@
-//! 抖音外部服务接入（docs/06-tools-plugins.md 第 3 节）：连接 hermes-douyin 的 Unix socket。
+//! 抖音外部服务接入（docs/06-tools-plugins.md 第 3 节）：连接 lyrabot-douyin 的 Unix socket。
 //!
 //! 与 Hermes 插件的差异：
 //! - 公开发布不再由模型调用：用户在 QQ 发送“确认发布 <plan_id>”后，运行时经 [`Douyin::intercept`] 直接提交发布，
