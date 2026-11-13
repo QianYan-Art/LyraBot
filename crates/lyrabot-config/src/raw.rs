@@ -98,6 +98,8 @@ struct RawOrchestra {
     max_concurrent: usize,
     #[serde(default = "d_orchestra_window")]
     context_window: u64,
+    compaction_ratio: Option<f64>,
+    compaction_keep_tokens: Option<u64>,
     worker_prompt: PathBuf,
     #[serde(default)]
     worker_tools: Vec<String>,
@@ -245,6 +247,8 @@ pub(crate) fn load_config(path: &Path) -> Result<Config> {
         default_effort: ro.default_effort,
         max_concurrent: ro.max_concurrent,
         context_window: ro.context_window,
+        compaction_ratio: ro.compaction_ratio.unwrap_or(raw.agent.compaction_ratio),
+        compaction_keep_tokens: ro.compaction_keep_tokens.unwrap_or(raw.agent.compaction_keep_tokens),
         worker_prompt: resolve(&ro.worker_prompt),
         worker_tools: ro.worker_tools,
         specialists: ro.specialists,

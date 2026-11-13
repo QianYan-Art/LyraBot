@@ -100,8 +100,16 @@ impl Config {
         if pc.max_segments == 0 || pc.debounce_ms > pc.max_wait_ms {
             return Err(ConfigError::Invalid("persona.pacer：max_segments 至少为 1，且 debounce_ms 不大于 max_wait_ms".into()));
         }
-        if !(0.3..=0.98).contains(&self.agent.compaction_ratio) {
-            return Err(ConfigError::Invalid("agent.compaction_ratio 应在 0.3~0.98".into()));
+        for (field, r) in [("agent.compaction_ratio", self.agent.compaction_ratio), ("orchestra.compaction_ratio", self.orchestra.compaction_ratio)] {
+            if !(0.3..=0.98).contains(&r) {
+                return Err(ConfigError::Invalid(format!("{field} 应在 0.3~0.98")));
+            }
+        }
+        if self.agent.compaction_keep_tokens == 0 || self.orchestra.compaction_keep_tokens == 0 {
+            return Err(ConfigError::Invalid("compaction_keep_tokens 必须大于 0".into()));
+        }
+        if self.orchestra.compaction_keep_tokens >= self.orchestra.context_window {
+            return Err(ConfigError::Invalid("orchestra.compaction_keep_tokens 必须小于 orchestra.context_window".into()));
         }
         Ok(())
     }

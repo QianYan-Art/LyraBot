@@ -23,6 +23,7 @@ pub use outbox::Queued;
 pub use recall::RecallHit;
 pub use sessions::{Entry, EntryKind, NewSession, SessionKind, SessionRow, SessionStatus};
 
+use lyrabot_core::SessionId;
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::mpsc as std_mpsc;
@@ -111,6 +112,21 @@ impl Store {
         .await
     }
 
+    /// 会话仍存在时才写入（在存储线程内一次完成，不会与 GC 交错），避免会话被清理后又被后台任务写回它的键。
+    /// 返回是否写入。
+    pub async fn kv_set_for_session(&self, session: SessionId, key: &str, value: &str) -> Result<bool> {
+        let (key, value) = (key.to_owned(), value.to_owned());
+        self.call(move |c| {
+            let n = c.execute(
+                "INSERT INTO kv(key,value) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ?3)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                rusqlite::params![key, value, session],
+            )?;
+            Ok(n > 0)
+        })
+        .await
+    }
+
     pub async fn kv_set(&self, key: &str, value: &str) -> Result<()> {
         let (key, value) = (key.to_owned(), value.to_owned());
         self.call(move |c| {
@@ -129,4 +145,43 @@ pub(crate) fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod kv_tests {
+    use crate::{NewSession, Store};
+
+    #[tokio::test]
+    async fn kv_set_for_session_skips_deleted_sessions() {
+        let s = Store::in_memory().unwrap();
+        let sid = s.create_session(NewSession { model: "m".into(), effort: "low".into(), ..Default::default() }).await.unwrap();
+        assert!(s.kv_set_for_session(sid, "learn_ckpt:x", "1").await.unwrap());
+        assert!(s.kv_set_for_session(sid, "learn_ckpt:x", "2").await.unwrap(), "已存在时覆盖");
+        assert_eq!(s.kv_get("learn_ckpt:x").await.unwrap().as_deref(), Some("2"));
+        assert!(!s.kv_set_for_session(sid + 999, "learn_fail:gone", "3:1").await.unwrap(), "会话不存在时不写");
+        assert_eq!(s.kv_get("learn_fail:gone").await.unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use crate::{EntryKind, NewSession, Store};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn messages_between_keeps_frozen_batch_when_newer_messages_flood() {
+        let s = Store::in_memory().unwrap();
+        let sid = s.create_session(NewSession { model: "m".into(), effort: "low".into(), ..Default::default() }).await.unwrap();
+        let mut ids = Vec::new();
+        for i in 0..5 {
+            ids.push(s.append(sid, EntryKind::Message, json!({"role": "user", "content": format!("旧{i}")}), 1).await.unwrap());
+        }
+        for i in 0..10 {
+            s.append(sid, EntryKind::Message, json!({"role": "user", "content": format!("新{i}")}), 1).await.unwrap();
+        }
+        // 冻结的批次上界在 LIMIT 之前生效：新消息再多，也取回原来那一批
+        let batch = s.messages_between(sid, 0, Some(ids[4]), 3).await.unwrap();
+        assert_eq!(batch.iter().map(|e| e.id).collect::<Vec<_>>(), ids[2..5].to_vec());
+        assert_eq!(s.messages_since(sid, 0, 3).await.unwrap().len(), 3, "无上界时取最新的");
+    }
 }

@@ -103,7 +103,7 @@ memory = "ops.md"
     std::fs::write(dir.join("lyrabot.toml"), cfg).unwrap();
     let handle = Arc::new(ConfigHandle::open(dir.join("lyrabot.toml")).unwrap());
     let store = Store::in_memory().unwrap();
-    let kernel = Kernel::new(store.clone(), KernelConfig { compaction_ratio: 0.9, compaction_keep_tokens: 1000, max_tool_calls: 10 });
+    let kernel = Kernel::new(store.clone(), KernelConfig { max_tool_calls: 10 });
     let fake = Arc::new(Fake { delay: Duration::from_millis(delay_ms), requests: Mutex::default() });
     let f2 = fake.clone();
     let (tx, reports) = mpsc::unbounded_channel();

@@ -1,4 +1,4 @@
-//! recall：检索主对话角色与用户的过往对话（已结束的会话与压缩摘要），用于“上次那个”“之前说过的”。
+//! recall：检索主对话角色与用户的过往对话（之前的会话、压缩摘要，以及本会话已被压缩出上下文的原话），用于“上次那个”“之前说过的”。
 //! 按需增量建索引（FTS5 trigram），不用就没有任何常驻开销。
 
 use crate::util::arg_str;
@@ -26,7 +26,7 @@ impl Recall {
     pub fn new(store: Store) -> Self {
         let spec = ToolSpec {
             name: "recall".into(),
-            description: "翻找你们以前的聊天记录（之前的会话与摘要）。对方提到“上次”“之前说过”“那天聊的”而当前上下文里没有时用。\
+            description: "翻找你们以前的聊天记录（之前的会话、摘要，以及这次聊天里较早、已经压缩掉的原话）。对方提到“上次”“之前说过”“那天聊的”而当前上下文里没有时用。\
                           query 写可能原样出现的关键词，可用空格写几个不同说法（如“苏州 园林 旅游”）；想不出关键词或没搜到时留空，\
                           会返回之前最近的一段对话。"
                 .into(),
@@ -97,11 +97,11 @@ pub fn render_recent(hits: &[RecallHit]) -> String {
     format!("之前最近的一段对话（旧记录，不是对方的新消息）：\n{}", lines.join("\n"))
 }
 
-/// 渲染命中：跳过当前会话（已在上下文里），按条数与总字数限长。
-pub fn render(hits: &[RecallHit], query: &str, current: i64) -> String {
+/// 渲染命中，按条数与总字数限长。当前会话仍在上下文里的部分已由检索排除，这里不再过滤。
+pub fn render(hits: &[RecallHit], query: &str) -> String {
     let mut out = Vec::new();
     let mut used = 0;
-    for h in hits.iter().filter(|h| h.session != current).take(MAX_HITS) {
+    for h in hits.iter().take(MAX_HITS) {
         let who = match h.role.as_str() {
             "user" => "对方",
             "assistant" => "你",
@@ -141,7 +141,7 @@ impl Tool for Recall {
             };
         }
         match self.store.recall_search(query, ctx.session, MAX_HITS as u32).await {
-            Ok(hits) => ToolOutput::ok(render(&hits, query, ctx.session)),
+            Ok(hits) => ToolOutput::ok(render(&hits, query)),
             Err(e) => ToolOutput::err(format!("检索失败：{e}")),
         }
     }
@@ -156,14 +156,13 @@ mod tests {
     }
 
     #[test]
-    fn renders_snippets_and_skips_current_session() {
+    fn renders_snippets() {
         let long = format!("{}我家猫叫年糕{}", "前".repeat(100), "后".repeat(100));
-        let hits = vec![hit(9, "user", "当前会话里的年糕"), hit(2, "user", &long), hit(3, "summary", "聊过年糕的饮食")];
-        let out = render(&hits, "年糕", 9);
-        assert!(!out.contains("当前会话"), "{out}");
+        let hits = vec![hit(2, "user", &long), hit(3, "summary", "聊过年糕的饮食")];
+        let out = render(&hits, "年糕");
         assert!(out.contains("对方] …") && out.contains("我家猫叫年糕") && out.contains("当时的摘要"), "{out}");
         assert!(!out.contains(&"前".repeat(80)), "长文本只取命中附近");
-        assert!(render(&[], "不存在", 1).contains("没有找到"));
+        assert!(render(&[], "不存在").contains("没有找到"));
         let recent = render_recent(&[hit(2, "assistant", "后说的"), hit(2, "user", "先说的")]);
         assert!(recent.find("先说的").unwrap() < recent.find("后说的").unwrap(), "按时间正序");
         assert!(render_recent(&[]).contains("没有可翻"));

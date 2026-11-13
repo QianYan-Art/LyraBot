@@ -153,10 +153,11 @@ impl Runtime {
                 let compacted = self.kernel.compact(&spec, s.id, &ctx, est, &CancellationToken::new()).await?;
                 self.refresh_snapshot(s.id).await?;
                 self.state().reset_keepalive(true);
-                if compacted {
-                    card::ok(format!("已压缩并刷新记忆快照，压缩前约 {} token", tokens(est)))
-                } else {
-                    card::ok("内容较少无需压缩历史，已刷新当前会话的记忆快照")
+                match compacted {
+                    lyrabot_agent::CompactOutcome::Summarized => card::ok(format!("已生成摘要并刷新记忆快照，压缩前约 {} token", tokens(est))),
+                    lyrabot_agent::CompactOutcome::Folded => card::ok(format!("只折叠了较早的工具结果（未生成摘要），已刷新记忆快照，压缩前约 {} token", tokens(est))),
+                    lyrabot_agent::CompactOutcome::NothingToCompact => card::ok("没有可压缩的内容（只剩上次的摘要或内容都在保留范围内），已刷新记忆快照"),
+                    lyrabot_agent::CompactOutcome::EmptySummary => card::warn("压缩模型返回了空摘要，这次没有压成；记忆快照已刷新"),
                 }
             }
             Command::Model(None) => {

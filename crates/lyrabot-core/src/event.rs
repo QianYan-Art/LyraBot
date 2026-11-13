@@ -20,7 +20,8 @@ pub enum AgentEvent {
     ReasoningDelta { session: SessionId, text: String },
     ToolStart { session: SessionId, call_id: String, name: String },
     ToolEnd { session: SessionId, call_id: String, name: String, is_error: bool, ms: u64 },
-    Compacted { session: SessionId, before_tokens: u64 },
+    /// 压缩完成；`summarized` 为假表示只折叠了较早的工具结果，没有生成新摘要
+    Compacted { session: SessionId, before_tokens: u64, summarized: bool },
     /// 一次模型请求结束（一轮可能包含多次请求）
     Usage { session: SessionId, usage: Usage },
     TurnEnd { session: SessionId, reason: StopReason, text: String },

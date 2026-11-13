@@ -127,6 +127,7 @@ use = "聊到过去的事、家庭、成长经历或世界观背景时"
 ### 3.1 后台学习
 
 - 触发：后台每 60 s 检查一次，主对话角色空闲且（新消息 ≥ 30 条，或空闲 ≥ 10 分钟且 ≥ 8 条）时学习；`/learn now` 立即学习。进度按会话记在 kv `learn_ckpt:<session>`，对话稿只取最新约 6000 字。模型默认 `kimi-for-coding`、思考 low。
+- 失败处理（2026-11-13）：模型输出不是合法 JSON 时不入库、不衰减说法库、不推进进度，失败次数记在 kv `learn_fail:<session>`，同一批连续 3 次失败才跳过这批（只推进进度）；学习与记忆整理互不阻断，任一步失败另一步照常进行，错误随结果一起返回。
 - 一次调用同时输出两类：
   - 说法：只从用户的消息里提取 `jargon`（梗、缩写、谐音、专属叫法，带含义）与 `habit`（口头禅、称呼偏好等），每批至多 8 条；排除普通词汇、一次性事件和隐私。
   - 记忆候选：读双方对话，但只记用户陈述的（stated）、用户明确认可的约定（agreed）、用户纠正过的（corrected）；依据缺失或不在这三种之内的一律丢弃；主对话角色对自己的描述与剧情发挥、一次性任务、带时间的提醒、隐私凭据都不记。候选进入 `memory_candidates` 表。
@@ -147,7 +148,7 @@ use = "聊到过去的事、家庭、成长经历或世界观背景时"
 
 ### 3.4 管理与配置
 
-- `/learn` 总览；`/learn list 说法`、`/learn list 记忆`（记忆按 `u1`、`m1` 编号）；`/learn forget <编号|u3|m2>`；`/learn now`、`/learn undo`、`/learn on|off`。命令输出见 `07-platform-commands.md` 第 4 节。
+- `/learn` 总览：现有说法与记忆条数、各记忆文件字数（达到上限 90% 时提示）、待整理候选、最近一次学习或整理的结果（kv `learn_last`，含文件未变、因字数上限没能写入、解析失败等不产生修订的情况）与最近一次修订；`/learn list 说法`、`/learn list 记忆`（记忆按 `u1`、`m1` 编号）；`/learn forget <编号|u3|m2>`；`/learn now`、`/learn undo`、`/learn on|off`。命令输出见 `07-platform-commands.md` 第 4 节。
 - 说法写入 SQLite 表达库，记忆写入 `<memory_dir>`（服务器 `/var/lib/lyrabot/memory/`）下的 `user.md`、`memory.md`，专员另有 `ops.md`、`creator.md`。
 - 配置 `[persona.learner]`：`enabled`、`model`、`effort`、`batch_messages`、`idle_minutes`、`min_messages`、`max_items`、`inject_max_chars`。
 - 旧会话不进提示词：需要时由 `recall` 工具按需检索（见 `06-tools-plugins.md` 第 1 节）。

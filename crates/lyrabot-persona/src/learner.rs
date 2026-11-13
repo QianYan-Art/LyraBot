@@ -109,7 +109,8 @@ struct RawMemory {
 }
 
 /// 解析模型输出：容忍代码块包裹；兼容旧版只有说法数组的输出；丢弃不合规的条目。
-pub fn parse(output: &str) -> Learned {
+/// 输出不是合法 JSON 时返回 `None`，与“解析成功但没学到东西”区分开（后者不应推进衰减以外的任何判断）。
+pub fn parse(output: &str) -> Option<Learned> {
     let body = output.trim();
     let raw = match (body.find('{'), body.find('[')) {
         // 对象在数组之前出现：新格式
@@ -122,10 +123,10 @@ pub fn parse(output: &str) -> Learned {
         _ => None,
     };
     let Some(raw) = raw else {
-        tracing::warn!("学习输出不是合法 JSON，忽略本批");
-        return Learned::default();
+        tracing::warn!("学习输出不是合法 JSON");
+        return None;
     };
-    Learned { expressions: parse_expressions(raw.expressions), memories: parse_memories(raw.memories) }
+    Some(Learned { expressions: parse_expressions(raw.expressions), memories: parse_memories(raw.memories) })
 }
 
 fn parse_memories(raw: Vec<RawMemory>) -> Vec<MemoryNote> {
@@ -174,7 +175,7 @@ pub async fn learn(
     persona: &crate::Persona,
     transcript: &str,
     cancel: CancellationToken,
-) -> Result<Learned, lyrabot_llm::LlmError> {
+) -> Result<Option<Learned>, lyrabot_llm::LlmError> {
     let sys = LEARN_PROMPT.replace("{{user}}", persona.user_name()).replace("{{char}}", persona.name());
     let req = ChatRequest {
         model: model.to_owned(),
@@ -316,12 +317,12 @@ mod tests {
         let out = "```json\n[{\"kind\":\"jargon\",\"text\":\"寄了\",\"meaning\":\"失败\",\"situation\":\"搞砸\",\"triggers\":[\"寄了\",\"寄\"]},\
                    {\"kind\":\"other\",\"text\":\"x\"},{\"kind\":\"habit\",\"text\":\"  \"},\
                    {\"kind\":\"habit\",\"text\":\"小歌\",\"triggers\":[]}]\n```";
-        let v = parse(out).expressions;
+        let v = parse(out).unwrap().expressions;
         assert_eq!(v.len(), 2, "兼容旧版纯数组输出");
         assert_eq!(v[0].triggers, vec!["寄了"], "单字触发词被丢弃");
         assert_eq!(v[1].triggers, vec!["小歌"], "缺触发词时用原文");
-        assert_eq!(parse("不是 JSON"), Learned::default());
-        assert_eq!(parse("[]"), Learned::default());
+        assert_eq!(parse("不是 JSON"), None, "解析失败与空结果区分开");
+        assert_eq!(parse("[]"), Some(Learned::default()));
     }
 
     #[test]
@@ -333,7 +334,7 @@ mod tests {
                          {"target":"user","text":"短"},
                          {"target":"user","text":"用户改用北京时间","basis":"guess"},
                          {"target":"user","text":"用户住在杭州"}]}"#;
-        let l = parse(out);
+        let l = parse(out).unwrap();
         assert_eq!(l.expressions.len(), 1);
         assert_eq!(
             l.memories.iter().map(|m| (m.target.as_str(), m.basis.as_str())).collect::<Vec<_>>(),

@@ -156,5 +156,11 @@ pub(crate) fn build_turn_spec(
         system,
         tools,
         tail: None,
+        compaction: lyrabot_agent::CompactPolicy {
+            ratio: o.compaction_ratio,
+            keep_tokens: o.compaction_keep_tokens,
+            style: lyrabot_agent::CompactStyle::Task,
+            time_label: None,
+        },
     })
 }

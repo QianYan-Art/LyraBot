@@ -28,20 +28,55 @@ pub type Result<T> = std::result::Result<T, AgentError>;
 
 #[derive(Debug, Clone)]
 pub struct KernelConfig {
-    pub compaction_ratio: f64,
-    pub compaction_keep_tokens: u64,
     pub max_tool_calls: u32,
 }
 
 impl From<&lyrabot_config::AgentConfig> for KernelConfig {
     fn from(c: &lyrabot_config::AgentConfig) -> Self {
-        Self {
-            compaction_ratio: c.compaction_ratio,
-            compaction_keep_tokens: c.compaction_keep_tokens,
-            max_tool_calls: c.max_tool_calls,
-        }
+        Self { max_tool_calls: c.max_tool_calls }
     }
 }
+
+/// 压缩稿风格：主对话角色关心聊天的连续性，后台执行者关心任务状态，两者要保留的信息不同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactStyle {
+    Chat,
+    Task,
+}
+
+/// 会话级压缩策略，由主对话角色与后台执行者各自给出。
+#[derive(Clone)]
+pub struct CompactPolicy {
+    /// 上下文占窗口的比例达到该值时自动压缩
+    pub ratio: f64,
+    /// 压缩时保留的最近消息估算 token 数
+    pub keep_tokens: u64,
+    pub style: CompactStyle,
+    /// 压缩稿中给消息标注时间（落库毫秒时间戳 → 文本，如按用户时区格式化）；`None` 不标注
+    pub time_label: Option<Arc<dyn Fn(i64) -> String + Send + Sync>>,
+}
+
+impl Default for CompactPolicy {
+    fn default() -> Self {
+        Self { ratio: 0.9, keep_tokens: 20_000, style: CompactStyle::Task, time_label: None }
+    }
+}
+
+/// 一次压缩的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompactOutcome {
+    /// 生成了摘要并写入 compaction 条目
+    Summarized,
+    /// 只把较早的工具结果折叠成占位，未调用模型
+    Folded,
+    /// 没有可压缩的内容：切分点前只剩上次的摘要，或全部内容都在保留尾部内
+    NothingToCompact,
+    /// 调用了压缩模型，但输出解析后摘要为空
+    EmptySummary,
+}
+
+/// 自动压缩没压成后，上下文增长到失败时的这一倍数之前不再自动重试，避免每轮都白调一次模型。
+const COMPACT_RETRY_GROWTH: f64 = 1.1;
 
 /// 一轮对话所需的全部"人格/编排"输入。
 #[derive(Clone)]
@@ -54,8 +89,9 @@ pub struct TurnSpec {
     /// 系统段（稳定在前）
     pub system: Vec<String>,
     pub tools: Toolset,
-    /// 每次请求附加在最后一条 user 消息末尾的动态内容；不落库。
+    /// 本轮附加在最后一条 user 输入末尾的动态内容，随该消息落库（见 [`Message::tail`]）。
     pub tail: Option<String>,
+    pub compaction: CompactPolicy,
 }
 
 /// 会话级消息队列（与 pi 语义一致）。
@@ -111,12 +147,14 @@ pub struct Kernel {
     cfg: KernelConfig,
     /// 各会话最近一次完成模型请求的时刻（用于计算并记录请求间隔）。
     last_req: Arc<Mutex<BTreeMap<SessionId, Instant>>>,
+    /// 各会话最近一次自动压缩没压成时的估算 token 数（退避用）
+    compact_backoff: Arc<Mutex<BTreeMap<SessionId, u64>>>,
 }
 
 impl Kernel {
     pub fn new(store: Store, cfg: KernelConfig) -> Self {
         let (events, _) = broadcast::channel(1024);
-        Self { store, events, cfg, last_req: Arc::new(Mutex::new(BTreeMap::new())) }
+        Self { store, events, cfg, last_req: Arc::default(), compact_backoff: Arc::default() }
     }
 
     /// 返回距该会话上次模型请求完成的空闲时长，并顺带清理超过 24 小时的陈旧记录。
@@ -143,8 +181,10 @@ impl Kernel {
     /// 清理已删除会话的请求时间记录。
     pub fn forget_sessions(&self, ids: &[SessionId]) {
         let mut map = self.last_req.lock().expect("last_req 锁中毒");
+        let mut backoff = self.compact_backoff.lock().expect("compact_backoff 锁中毒");
         for id in ids {
             map.remove(id);
+            backoff.remove(id);
         }
     }
 
@@ -215,19 +255,38 @@ impl Kernel {
                 break StopReason::Cancelled;
             }
             let mut ctx = self.context(session).await?;
-            let est = context::estimate_messages(&ctx).max(last_prompt_tokens)
-                + unpersisted.iter().map(|m| context::estimate_tokens(m.char_len())).sum::<u64>();
-            if (est as f64) >= spec.context_window as f64 * self.cfg.compaction_ratio {
-                match self.compact(spec, session, &ctx, est, &cancel).await {
-                    Ok(true) => ctx = self.context(session).await?,
-                    Ok(false) => {}
-                    // 压缩被打断：与生成被打断同样处理，未落库的输入经 unconsumed 交回
-                    Err(_) if cancel.is_cancelled() => break StopReason::Cancelled,
+            let pending_est: u64 = unpersisted.iter().map(|m| context::estimate_tokens(m.char_len())).sum();
+            let mut est = context::estimate_messages(&ctx).max(last_prompt_tokens) + pending_est;
+            if (est as f64) >= spec.context_window as f64 * spec.compaction.ratio && !self.compact_backed_off(session, est) {
+                let result = self.compact(spec, session, &ctx, est, &cancel).await;
+                // 压缩期间被取消：与生成被打断同样处理，未落库的输入经 unconsumed 交回
+                if cancel.is_cancelled() {
+                    break StopReason::Cancelled;
+                }
+                match result {
+                    Ok(CompactOutcome::Summarized | CompactOutcome::Folded) => {
+                        ctx = self.context(session).await?;
+                        est = context::estimate_messages(&ctx) + pending_est;
+                    }
+                    Ok(outcome) => {
+                        self.compact_backoff.lock().expect("compact_backoff 锁中毒").insert(session, est);
+                        tracing::warn!(session, ?outcome, est, "自动压缩没压成，上下文再增长约 10% 之前不再重试");
+                    }
                     // 压缩本身失败不终止本轮，按原上下文继续（超长时由模型请求报错并保存输入）
                     Err(e) => tracing::warn!(session, error = %e, "会话压缩失败，本轮跳过压缩"),
                 }
             }
-            ctx.extend(unpersisted.iter().cloned().map(|message| CtxMessage { entry: None, message }));
+            // 后台任务的最终上下文仍超出窗口（压不下来、处于退避期、或保留尾部本身就超窗）：明确停止并汇报，
+            // 不带着超长上下文去请求。退避只控制是否重试压缩，不绕过这道检查。
+            if spec.compaction.style == CompactStyle::Task && est >= spec.context_window {
+                for m in unpersisted.drain(..) {
+                    self.persist(session, &m).await?;
+                }
+                inputs_saved = true;
+                error = Some(LlmError::new(ErrorKind::ContextOverflow, "上下文已超出窗口且无法再压缩，任务停止"));
+                break StopReason::Error;
+            }
+            ctx.extend(unpersisted.iter().cloned().map(|message| CtxMessage { entry: None, at: None, message }));
 
             let req = ChatRequest {
                 model: spec.model.clone(),
@@ -402,8 +461,14 @@ impl Kernel {
         out
     }
 
+    /// 该会话是否处于压缩退避期：上次自动压缩没压成，且上下文尚未增长到当时的 [`COMPACT_RETRY_GROWTH`] 倍。
+    fn compact_backed_off(&self, session: SessionId, est: u64) -> bool {
+        self.compact_backoff.lock().expect("compact_backoff 锁中毒").get(&session).is_some_and(|&failed| (est as f64) < failed as f64 * COMPACT_RETRY_GROWTH)
+    }
+
     /// 压缩：先把切分点之前的工具结果折叠成占位（不调模型），若已降到窗口的 [`FOLD_TARGET`] 以下就到此为止；
-    /// 否则对切分点之前的上下文做枚举式摘要 + 任务胶囊，写入 compaction 条目。返回是否发生了压缩。
+    /// 否则按会话的压缩风格对切分点之前的上下文做摘要，写入 compaction 条目。
+    /// 压成（摘要或折叠）时解除该会话的退避；手动压缩不受退避限制。
     pub async fn compact(
         &self,
         spec: &TurnSpec,
@@ -411,41 +476,49 @@ impl Kernel {
         ctx: &[CtxMessage],
         tokens_before: u64,
         cancel: &CancellationToken,
-    ) -> Result<bool> {
-        let Some(split) = context::split_point(ctx, self.cfg.compaction_keep_tokens) else {
-            return Ok(false);
+    ) -> Result<CompactOutcome> {
+        let outcome = self.compact_inner(spec, session, ctx, tokens_before, cancel).await?;
+        if matches!(outcome, CompactOutcome::Summarized | CompactOutcome::Folded) {
+            self.compact_backoff.lock().expect("compact_backoff 锁中毒").remove(&session);
+        }
+        Ok(outcome)
+    }
+
+    async fn compact_inner(
+        &self,
+        spec: &TurnSpec,
+        session: SessionId,
+        ctx: &[CtxMessage],
+        tokens_before: u64,
+        cancel: &CancellationToken,
+    ) -> Result<CompactOutcome> {
+        let Some(split) = context::split_point(ctx, spec.compaction.keep_tokens) else {
+            return Ok(CompactOutcome::NothingToCompact);
         };
         let first_kept = ctx[split].entry;
         if let Some(before) = first_kept {
             let stub = context::estimate_tokens(FOLDED_TOOL.chars().count());
             let saved: u64 = ctx[..split]
                 .iter()
-                .filter(|m| m.message.role == Role::Tool && m.message.text() != FOLDED_TOOL)
+                // 只统计确实落库、编号在折叠线之前的工具结果；请求时临时补的占位不会被折叠，不能算作收益
+                .filter(|m| m.message.role == Role::Tool && m.entry.is_some_and(|id| id < before) && m.message.text() != FOLDED_TOOL)
                 .map(|m| context::estimate_tokens(m.message.char_len()).saturating_sub(stub))
                 .sum();
             if saved > 0 && (tokens_before.saturating_sub(saved) as f64) < spec.context_window as f64 * FOLD_TARGET {
                 self.store.append(session, EntryKind::Fold, serde_json::to_value(Fold { before })?, 0).await?;
-                self.emit(AgentEvent::Compacted { session, before_tokens: tokens_before });
+                self.emit(AgentEvent::Compacted { session, before_tokens: tokens_before, summarized: false });
                 tracing::info!(session, tokens_before, saved, "已折叠较早的工具结果");
-                return Ok(true);
+                return Ok(CompactOutcome::Folded);
             }
         }
-        let mut transcript = String::new();
-        for m in &ctx[..split] {
-            let who = match m.message.role {
-                Role::User => "用户",
-                Role::Assistant => "助手",
-                Role::Tool => "工具结果",
-            };
-            let mut body = m.message.text();
-            for c in &m.message.tool_calls {
-                body.push_str(&format!("\n[调用 {} {}]", c.name, truncate(&c.arguments, 400)));
-            }
-            transcript.push_str(&format!("{who}：{}\n", truncate(&body, 4000)));
-        }
+        let transcript = context::transcript(&ctx[..split], &spec.compaction);
+        let prompt = match spec.compaction.style {
+            CompactStyle::Chat => COMPACT_PROMPT_CHAT,
+            CompactStyle::Task => COMPACT_PROMPT_TASK,
+        };
         let req = ChatRequest {
             model: spec.model.clone(),
-            system: vec![COMPACT_PROMPT.to_owned()],
+            system: vec![prompt.to_owned()],
             messages: vec![Message::user(transcript)],
             tools: Vec::new(),
             effort: Some(Effort::Low),
@@ -456,36 +529,38 @@ impl Kernel {
         let summary = context::render_compaction(&c.message.text());
         if summary.trim().is_empty() {
             tracing::warn!(session, "压缩摘要为空，跳过");
-            return Ok(false);
+            return Ok(CompactOutcome::EmptySummary);
         }
         let payload = Compaction { summary, first_kept, tokens_before };
         self.store.append(session, EntryKind::Compaction, serde_json::to_value(&payload)?, 0).await?;
-        self.emit(AgentEvent::Compacted { session, before_tokens: tokens_before });
+        self.emit(AgentEvent::Compacted { session, before_tokens: tokens_before, summarized: true });
         tracing::info!(session, tokens_before, "会话已压缩");
-        Ok(true)
+        Ok(CompactOutcome::Summarized)
     }
 }
 
 /// 折叠后需降到窗口的这一比例以下才视为够用，否则直接做摘要（避免刚折叠又触发压缩）。
 const FOLD_TARGET: f64 = 0.6;
 
-const COMPACT_PROMPT: &str = "你负责压缩对话历史，供同一个助手继续对话。\
-先在心里逐条清点：日期与截止时间、数字与金额、人名与账号、已确认的决定、用户纠正过的地方——这些必须全部写进结果，不许合并丢弃。\
+/// 主对话角色（聊天）的压缩提示：保住聊天的连续性与时间线，任务胶囊只在确有进行中的事时写。
+const COMPACT_PROMPT_CHAT: &str = "你负责压缩一段私聊记录，供同一个聊天角色继续和对方聊下去。记录里的〔〕内容是系统信息（时间、后台结果等）。\
+先在心里逐条清点：对方说过的事实与近况、双方的约定与要提醒的事、称呼与偏好、对方纠正过的地方、还没转述完的后台结果、日期与数字——这些必须全部写进结果，不许合并丢弃。\
+记录中标了时间的，摘要里保留具体日期或时间（如“11 月 13 日晚上说……”），不要改写成“刚才”“最近”。\
 只输出一个 JSON 对象，不要代码块或解释：\
-{\"summary\": \"分点摘要，保留未完成的任务与进度、用户的偏好与要求、做出的承诺和上面清点的关键事实，不超过 800 字\", \
-\"capsule\": {\"objective\": \"当前进行中的任务目标\", \"constraints\": [\"用户明确提出的要求或禁忌\"], \"decisions\": [\"已确认的决定\"], \
-\"verification\": [\"已验证或未验证的事项及结论\"], \"next_steps\": [\"接下来要做的事\"]}}。\
-没有进行中的任务时 capsule 为 null；某项没有内容就给空数组。不要编造，不要写客套话。";
+{\"summary\": \"分点摘要，按时间先后，保留上面清点的内容与双方关系、情绪的进展，不超过 800 字\", \
+\"capsule\": {\"objective\": \"进行中的事\", \"constraints\": [\"对方明确提出的要求或禁忌\"], \"decisions\": [\"已确认的决定\"], \
+\"verification\": [\"已确认或尚未确认的事项\"], \"next_steps\": [\"接下来要做或要提醒的事\"]}}。\
+没有进行中的事时 capsule 为 null；某项没有内容就给空数组。不要编造，不要写客套话，不要模仿角色口吻。";
 
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_owned()
-    } else {
-        let mut t: String = s.chars().take(max_chars).collect();
-        t.push('…');
-        t
-    }
-}
+/// 后台执行者（任务）的压缩提示：保住任务状态、精确细节与已执行的外部操作。
+const COMPACT_PROMPT_TASK: &str = "你负责压缩一个后台任务的执行记录，供同一个执行者继续完成任务。\
+先在心里逐条清点：精确的文件路径、命令、报错原文、编号与链接、数字与日期、用户的要求与禁忌、已确认的决定——这些必须原样写进结果，不许合并丢弃。\
+特别列出已经执行过的、对外部产生影响的操作（发信、部署、写文件、调接口、改配置等）及其结果，续接时据此避免重复执行。\
+只输出一个 JSON 对象，不要代码块或解释：\
+{\"summary\": \"分点摘要，保留任务进度与上面清点的关键事实，不超过 800 字\", \
+\"capsule\": {\"objective\": \"任务目标\", \"constraints\": [\"用户明确提出的要求或禁忌\"], \"decisions\": [\"已确认的决定\"], \
+\"side_effects\": [\"已执行的外部操作及结果\"], \"verification\": [\"已验证或未验证的事项及结论\"], \"next_steps\": [\"接下来要做的事\"]}}。\
+某项没有内容就给空数组。不要编造，不要写客套话。";
 
 /// 组装发给模型的消息：每条消息按 [`Message::wire`] 拼回落库的尾注入；
 /// `transient` 是本轮没有 user 输入时临时附在最后一条 user 消息上的尾注入（不落库）。

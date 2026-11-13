@@ -288,6 +288,9 @@ pub struct OrchestraConfig {
     pub max_concurrent: usize,
     /// 后台执行者（worker 与专员）上下文窗口上限（默认 131072，即 128K）
     pub context_window: u64,
+    /// 后台执行者的压缩触发比例与保留尾部；未配置时沿用 `[agent]`
+    pub compaction_ratio: f64,
+    pub compaction_keep_tokens: u64,
     /// 执行者系统提示文件
     pub worker_prompt: PathBuf,
     /// 任务型 worker 可用的工具名

@@ -108,7 +108,7 @@ impl Store {
                         [crate::recall::KV_RECALL_CKPT],
                     )?;
                     for id in &ids {
-                        tx.execute("DELETE FROM kv WHERE key IN (?1, ?2)", params![format!("persona_s2:{id}"), format!("learn_ckpt:{id}")])?;
+                        tx.execute("DELETE FROM kv WHERE key IN (?1, ?2, ?3)", params![format!("persona_s2:{id}"), format!("learn_ckpt:{id}"), format!("learn_fail:{id}")])?;
                     }
                 }
                 tx.commit()?;

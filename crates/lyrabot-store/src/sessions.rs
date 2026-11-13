@@ -193,13 +193,20 @@ impl Store {
 
     /// 会话自身 id 大于 `after` 的消息条目（按 id 升序，至多 `limit` 条，取最新的）。
     pub async fn messages_since(&self, session: SessionId, after: EntryId, limit: u32) -> Result<Vec<Entry>> {
+        self.messages_between(session, after, None, limit).await
+    }
+
+    /// 会话自身 id 在 `(after, upto]` 之间的消息条目（按 id 升序，至多 `limit` 条，取最新的）；`upto` 为空表示不设上界。
+    /// 上界在 LIMIT 之前过滤，之后新增的消息不会把这一段挤出结果。
+    pub async fn messages_between(&self, session: SessionId, after: EntryId, upto: Option<EntryId>, limit: u32) -> Result<Vec<Entry>> {
+        let upto = upto.unwrap_or(EntryId::MAX);
         self.call(move |c| {
             let mut st = c.prepare_cached(
                 "SELECT id,session_id,parent_id,kind,payload,tokens,created_at FROM (
-                    SELECT * FROM entries WHERE session_id=?1 AND id>?2 AND kind='message' ORDER BY id DESC LIMIT ?3
+                    SELECT * FROM entries WHERE session_id=?1 AND id>?2 AND id<=?4 AND kind='message' ORDER BY id DESC LIMIT ?3
                  ) ORDER BY id",
             )?;
-            let rows = st.query_map(params![session, after, limit], |r| {
+            let rows = st.query_map(params![session, after, limit, upto], |r| {
                 Ok((
                     r.get::<_, EntryId>(0)?,
                     r.get::<_, SessionId>(1)?,

@@ -339,7 +339,7 @@ impl Runtime {
             loop {
                 match rx.recv().await {
                     Ok(ev) if ev.session() != self.session() => {}
-                    Ok(AgentEvent::Compacted { session, .. }) => {
+                    Ok(AgentEvent::Compacted { session, summarized: true, .. }) => {
                         if let Err(e) = self.refresh_snapshot(session).await {
                             tracing::warn!(error = %e, "压缩后刷新记忆快照失败");
                         }
@@ -633,6 +633,15 @@ impl Runtime {
             system: kit.persona.system(&s2),
             tools,
             tail: Some(self.tail(&kit.persona, c, query)),
+            compaction: lyrabot_agent::CompactPolicy {
+                ratio: c.agent.compaction_ratio,
+                keep_tokens: c.agent.compaction_keep_tokens,
+                style: lyrabot_agent::CompactStyle::Chat,
+                time_label: Some({
+                    let kit = kit.clone();
+                    std::sync::Arc::new(move |ms: i64| kit.persona.time_label(ms))
+                }),
+            },
         })
     }
 

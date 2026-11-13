@@ -1,7 +1,7 @@
 //! 内核行为测试：用脚本化的假 Provider 驱动，覆盖工具并发、steer、取消、循环防护、压缩、尾注入。
 use async_trait::async_trait;
 use lyrabot_agent::context::SUMMARY_PREFIX;
-use lyrabot_agent::{Concurrency, Kernel, KernelConfig, Queues, Tool, ToolCtx, ToolOutput, ToolRegistry, TurnSpec};
+use lyrabot_agent::{CompactPolicy, Concurrency, Kernel, KernelConfig, Queues, Tool, ToolCtx, ToolOutput, ToolRegistry, TurnSpec};
 use lyrabot_core::{Message, Role, StopReason, ToolCall, ToolSpec, Usage};
 use lyrabot_llm::{ChatRequest, Completion, EventRx, FinishReason, LlmError, Provider, RemoteModel, StreamEvent};
 use lyrabot_store::{EntryKind, NewSession, Store};
@@ -100,7 +100,7 @@ impl Tool for Sleepy {
 async fn setup(provider: Arc<Fake>, tools: Vec<Arc<dyn Tool>>, window: u64) -> (Kernel, TurnSpec, i64) {
     let store = Store::in_memory().unwrap();
     let sid = store.create_session(NewSession { model: "m".into(), effort: "low".into(), ..Default::default() }).await.unwrap();
-    let kernel = Kernel::new(store, KernelConfig { compaction_ratio: 0.9, compaction_keep_tokens: 30, max_tool_calls: 40 });
+    let kernel = Kernel::new(store, KernelConfig { max_tool_calls: 40 });
     let mut reg = ToolRegistry::default();
     for t in tools {
         reg.register(t);
@@ -114,6 +114,7 @@ async fn setup(provider: Arc<Fake>, tools: Vec<Arc<dyn Tool>>, window: u64) -> (
         system: vec!["sys".into()],
         tools: reg.all(),
         tail: None,
+        compaction: CompactPolicy { keep_tokens: 30, ..Default::default() },
     };
     (kernel, spec, sid)
 }
@@ -453,4 +454,80 @@ async fn folding_old_tool_results_avoids_a_summary_call() {
     let branch = k.store().branch(sid).await.unwrap();
     assert!(branch.iter().any(|e| e.kind == EntryKind::Fold));
     assert!(branch.iter().any(|e| e.payload.to_string().contains(&"长".repeat(1000))), "原文仍在记录里");
+}
+
+#[tokio::test]
+async fn task_stops_when_over_window_and_nothing_to_compact() {
+    // 单条超长输入：没有可压缩的前缀，后台任务应明确停止并保存输入，而不是带着超长上下文去请求
+    let p = Fake::new(vec![Message::assistant("不该被请求")]);
+    let (k, spec, sid) = setup(p.clone(), vec![], 50).await;
+    let out = k.run_turn(&spec, sid, vec![Message::user("甲".repeat(200))], &Queues::default(), CancellationToken::new()).await.unwrap();
+    assert_eq!(out.reason, StopReason::Error);
+    assert_eq!(out.error.as_ref().map(|e| e.kind), Some(lyrabot_llm::ErrorKind::ContextOverflow));
+    assert!(out.inputs_saved && p.reqs().is_empty(), "输入落库，且没有发出请求");
+    assert_eq!(k.store().branch(sid).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn chat_continues_when_nothing_to_compact() {
+    let p = Fake::new(vec![Message::assistant("好")]);
+    let (k, mut spec, sid) = setup(p.clone(), vec![], 50).await;
+    spec.compaction.style = lyrabot_agent::CompactStyle::Chat;
+    let out = k.run_turn(&spec, sid, vec![Message::user("甲".repeat(200))], &Queues::default(), CancellationToken::new()).await.unwrap();
+    assert_eq!((out.reason, out.text.as_str()), (StopReason::Done, "好"));
+}
+
+#[tokio::test]
+async fn empty_summary_backs_off_further_auto_compaction() {
+    let p = Fake::new(vec![
+        Message::assistant("一"),
+        Message::assistant("二"),
+        Message::assistant("{\"capsule\": {"), // 压缩输出残缺且没有 summary：没压成
+        Message::assistant("三"),
+        Message::assistant("四"),
+    ]);
+    let (k, mut spec, sid) = setup(p.clone(), vec![], 100_000).await;
+    // 聊天风格：没压成时照常回复（任务风格在超出窗口时会直接停止，另有测试覆盖）
+    spec.compaction.style = lyrabot_agent::CompactStyle::Chat;
+    let q = Queues::default();
+    k.run_turn(&spec, sid, vec![Message::user("甲".repeat(200))], &q, CancellationToken::new()).await.unwrap();
+    k.run_turn(&spec, sid, vec![Message::user("乙".repeat(200))], &q, CancellationToken::new()).await.unwrap();
+    spec.context_window = 300;
+    assert_eq!(k.run_turn(&spec, sid, vec![Message::user("丙")], &q, CancellationToken::new()).await.unwrap().text, "三");
+    // 上下文只增长了一点：处于退避期，不再调用压缩模型
+    assert_eq!(k.run_turn(&spec, sid, vec![Message::user("丁")], &q, CancellationToken::new()).await.unwrap().text, "四");
+    let compact_reqs = p.reqs().iter().filter(|r| r.system.iter().any(|s| s.contains("压缩"))).count();
+    assert_eq!(compact_reqs, 1, "退避期内只尝试过一次压缩");
+    assert!(!k.store().branch(sid).await.unwrap().iter().any(|e| e.kind == EntryKind::Compaction));
+}
+
+#[tokio::test]
+async fn task_overflow_check_still_applies_during_backoff() {
+    // 第一次超窗停止后进入退避；再次运行同样超窗的上下文时不能因退避而直接去请求
+    let p = Fake::new(vec![Message::assistant("不该被请求")]);
+    let (k, spec, sid) = setup(p.clone(), vec![], 50).await;
+    let q = Queues::default();
+    let first = k.run_turn(&spec, sid, vec![Message::user("甲".repeat(200))], &q, CancellationToken::new()).await.unwrap();
+    assert_eq!(first.reason, StopReason::Error);
+    let again = k.run_turn(&spec, sid, vec![Message::user("再试")], &q, CancellationToken::new()).await.unwrap();
+    assert_eq!(again.error.as_ref().map(|e| e.kind), Some(lyrabot_llm::ErrorKind::ContextOverflow));
+    assert!(p.reqs().is_empty(), "两次都没有发出请求");
+}
+
+#[tokio::test]
+async fn padded_placeholder_is_not_counted_as_fold_savings() {
+    // 历史：用户 → 没有结果的调用（执行期间重启）→ 用户。补上的占位不是记录条目，折叠不了，不能返回 Folded
+    let p = Fake::new(vec![Message::assistant("{\"capsule\": {")]);
+    let (k, mut spec, sid) = setup(p.clone(), vec![], 100_000).await;
+    spec.compaction.keep_tokens = 1;
+    let mut call = Message::assistant("");
+    call.tool_calls.push(ToolCall { id: "lost".into(), name: "t".into(), arguments: "{}".into() });
+    for m in [Message::user("查一下"), call, Message::user("怎么样了")] {
+        k.store().append(sid, EntryKind::Message, serde_json::to_value(&m).unwrap(), 1).await.unwrap();
+    }
+    let ctx = k.context(sid).await.unwrap();
+    assert_eq!(ctx.iter().filter(|m| m.message.role == Role::Tool).count(), 1, "请求时补上了占位结果");
+    let out = k.compact(&spec, sid, &ctx, 100, &CancellationToken::new()).await.unwrap();
+    assert_ne!(out, lyrabot_agent::CompactOutcome::Folded);
+    assert!(!k.store().branch(sid).await.unwrap().iter().any(|e| e.kind == EntryKind::Fold));
 }

@@ -86,18 +86,20 @@ impl Store {
         .await
     }
 
-    /// 检索过往对话（新的在前），排除 `exclude` 会话（当前会话已在上下文里）。
+    /// 检索过往对话（新的在前）。`current` 会话只返回已被压缩出上下文的部分（最近一次压缩的保留起点之前），
+    /// 仍在上下文里的内容不重复返回。
     /// 查询按空白与常见分隔符拆成多个词，分别匹配后合并去重；不少于 3 字的词走 trigram 索引，更短的走子串扫描。
-    pub async fn recall_search(&self, query: &str, exclude: SessionId, limit: u32) -> Result<Vec<RecallHit>> {
+    pub async fn recall_search(&self, query: &str, current: SessionId, limit: u32) -> Result<Vec<RecallHit>> {
         let mut terms: Vec<String> = Vec::new();
         for t in query.split(|c: char| c.is_whitespace() || "，,、；;|".contains(c)).map(str::trim).filter(|t| !t.is_empty()) {
             if !terms.iter().any(|x| x == t) {
                 terms.push(t.to_owned());
             }
         }
+        let cutoff = self.compacted_cutoff(current).await?;
         let mut hits: Vec<RecallHit> = Vec::new();
         for term in terms.into_iter().take(6) {
-            for h in self.recall_term(term, exclude, limit).await? {
+            for h in self.recall_term(term, current, cutoff, limit).await? {
                 if !hits.iter().any(|x| x.entry == h.entry) {
                     hits.push(h);
                 }
@@ -108,15 +110,17 @@ impl Store {
         Ok(hits)
     }
 
-    /// 之前会话里最近的若干条对话（新的在前），用于“上次聊了什么”而想不出关键词的情况。
-    pub async fn recall_recent(&self, exclude: SessionId, limit: u32) -> Result<Vec<RecallHit>> {
+    /// 之前最近的若干条对话（新的在前），用于“上次聊了什么”而想不出关键词的情况；`current` 的处理同 [`Self::recall_search`]。
+    pub async fn recall_recent(&self, current: SessionId, limit: u32) -> Result<Vec<RecallHit>> {
+        let cutoff = self.compacted_cutoff(current).await?;
         self.call(move |c| {
             let mut st = c.prepare_cached(
-                "SELECT session, entry, role, at, text FROM recall_fts WHERE CAST(session AS INTEGER) != ?1
+                "SELECT session, entry, role, at, text FROM recall_fts
+                 WHERE (CAST(session AS INTEGER) != ?1 OR CAST(entry AS INTEGER) < ?3)
                  ORDER BY CAST(entry AS INTEGER) DESC LIMIT ?2",
             )?;
             Ok(st
-                .query_map(params![exclude, limit], |r| {
+                .query_map(params![current, limit, cutoff], |r| {
                     Ok(RecallHit { session: r.get(0)?, entry: r.get(1)?, role: r.get(2)?, at: r.get(3)?, text: r.get(4)? })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -124,7 +128,23 @@ impl Store {
         .await
     }
 
-    async fn recall_term(&self, q: String, exclude: SessionId, limit: u32) -> Result<Vec<RecallHit>> {
+    /// 会话最近一次压缩的保留起点（没有保留条目时为压缩条目本身）；更早的条目已不在上下文里。没有压缩时为 0。
+    async fn compacted_cutoff(&self, session: SessionId) -> Result<i64> {
+        self.call(move |c| {
+            use rusqlite::OptionalExtension;
+            Ok(c.query_row(
+                "SELECT COALESCE(json_extract(payload, '$.first_kept'), id) FROM entries
+                 WHERE session_id = ?1 AND kind = 'compaction' ORDER BY id DESC LIMIT 1",
+                [session],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0))
+        })
+        .await
+    }
+
+    async fn recall_term(&self, q: String, current: SessionId, cutoff: i64, limit: u32) -> Result<Vec<RecallHit>> {
         self.call(move |c| {
             let map = |r: &rusqlite::Row<'_>| {
                 Ok(RecallHit { session: r.get(0)?, entry: r.get(1)?, role: r.get(2)?, at: r.get(3)?, text: r.get(4)? })
@@ -133,17 +153,17 @@ impl Store {
                 // 整体作为短语匹配，双引号转义
                 let phrase = format!("\"{}\"", q.replace('"', "\"\""));
                 let mut st = c.prepare_cached(
-                    "SELECT session, entry, role, at, text FROM recall_fts WHERE recall_fts MATCH ?1 AND CAST(session AS INTEGER) != ?3
+                    "SELECT session, entry, role, at, text FROM recall_fts WHERE recall_fts MATCH ?1 AND (CAST(session AS INTEGER) != ?3 OR CAST(entry AS INTEGER) < ?4)
                      ORDER BY CAST(at AS INTEGER) DESC, CAST(entry AS INTEGER) DESC LIMIT ?2",
                 )?;
-                st.query_map(params![phrase, limit, exclude], map)?.collect::<rusqlite::Result<Vec<_>>>()?
+                st.query_map(params![phrase, limit, current, cutoff], map)?.collect::<rusqlite::Result<Vec<_>>>()?
             } else {
                 let like = format!("%{}%", q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
                 let mut st = c.prepare_cached(
-                    "SELECT session, entry, role, at, text FROM recall_fts WHERE text LIKE ?1 ESCAPE '\\' AND CAST(session AS INTEGER) != ?3
+                    "SELECT session, entry, role, at, text FROM recall_fts WHERE text LIKE ?1 ESCAPE '\\' AND (CAST(session AS INTEGER) != ?3 OR CAST(entry AS INTEGER) < ?4)
                      ORDER BY CAST(at AS INTEGER) DESC, CAST(entry AS INTEGER) DESC LIMIT ?2",
                 )?;
-                st.query_map(params![like, limit, exclude], map)?.collect::<rusqlite::Result<Vec<_>>>()?
+                st.query_map(params![like, limit, current, cutoff], map)?.collect::<rusqlite::Result<Vec<_>>>()?
             };
             Ok(hits)
         })
@@ -174,7 +194,9 @@ mod tests {
         // 两字查询走子串扫描；只包含主对话角色会话、不含工具输出与执行者会话
         let short = s.recall_search("年糕", 0, 10).await.unwrap();
         assert_eq!(short.iter().map(|h| h.role.as_str()).collect::<Vec<_>>(), vec!["summary", "assistant", "user"]);
-        assert!(s.recall_search("年糕", p, 10).await.unwrap().is_empty(), "排除指定会话在查询内完成");
+        // 当前会话只返回已压缩出上下文的部分：压缩前的原话可见，仍在上下文中的摘要不重复返回
+        let own = s.recall_search("年糕", p, 10).await.unwrap();
+        assert_eq!(own.iter().map(|h| h.role.as_str()).collect::<Vec<_>>(), vec!["assistant", "user"]);
         assert!(s.recall_search("100%", 0, 10).await.unwrap().is_empty());
         // 多个词分别匹配后合并去重：一个词命中即可
         let multi = s.recall_search("旅游 不爱吃饭，饮食", 0, 10).await.unwrap();
@@ -182,6 +204,6 @@ mod tests {
         // 最近对话：不需要关键词，排除指定会话
         let recent = s.recall_recent(0, 2).await.unwrap();
         assert_eq!(recent.iter().map(|h| h.role.as_str()).collect::<Vec<_>>(), vec!["summary", "assistant"]);
-        assert!(s.recall_recent(p, 10).await.unwrap().is_empty());
+        assert_eq!(s.recall_recent(p, 10).await.unwrap().len(), 2, "当前会话压缩前的两条");
     }
 }

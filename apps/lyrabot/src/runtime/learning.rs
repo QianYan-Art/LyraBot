@@ -11,6 +11,14 @@ use std::collections::BTreeMap;
 /// 记忆候选攒到这个数量，或最早的候选超过一天时整理。
 const CONSOLIDATE_AT: usize = 5;
 const CONSOLIDATE_AFTER_MS: i64 = 86_400_000;
+/// 同一批对话的学习输出连续解析失败达到该次数后跳过这批（只推进进度，不衰减说法库）。
+const MAX_PARSE_FAILURES: u32 = 3;
+/// 最近一次学习/整理的结果（时间与说明），在 `/learn` 总览中展示。
+const KV_LEARN_LAST: &str = "learn_last";
+
+pub(super) fn kv_learn_fail(session: SessionId) -> String {
+    format!("learn_fail:{session}")
+}
 
 fn now_ms() -> i64 {
     jiff::Timestamp::now().as_millisecond()
@@ -21,12 +29,17 @@ fn when(ms: i64) -> String {
     jiff::Timestamp::from_millisecond(ms).map(|t| t.to_zoned(tz).strftime("%m-%d %H:%M").to_string()).unwrap_or_default()
 }
 
-/// 变更说明的计数摘要，例如“新增 2 条、修改 1 条”。
+/// 变更说明的计数摘要，例如“新增 2 条、修改 1 条”；因字数上限没能写入的单独说明，不被“没有改动”吞掉。
 fn tally(changes: &[String]) -> String {
     let n = |p: &str| changes.iter().filter(|c| c.starts_with(p)).count();
     let parts: Vec<String> =
         [("新增", n("新增")), ("修改", n("修改")), ("删除", n("删除"))].into_iter().filter(|(_, k)| *k > 0).map(|(l, k)| format!("{l} {k} 条")).collect();
-    if parts.is_empty() { "没有改动".into() } else { parts.join("、") }
+    let mut s = if parts.is_empty() { "没有改动".to_owned() } else { parts.join("、") };
+    let limited: Vec<&String> = changes.iter().filter(|c| c.starts_with("未新增") || c.contains("保持原样")).collect();
+    if !limited.is_empty() {
+        s.push_str(&format!("；{} 项因记忆文件接近字数上限没有写入，可用 /learn list 记忆 查看后删掉旧条目", limited.len()));
+    }
+    s
 }
 
 impl Runtime {
@@ -119,44 +132,82 @@ impl Runtime {
         }
         let result = self.learn_and_consolidate(session, idle, force).await;
         self.learning.store(false, Ordering::Release);
+        // 记下结果供 /learn 总览查看（后台学习的结果原本只进日志）
+        let last = match &result {
+            Ok(Some(m)) => Some(m.clone()),
+            Ok(None) => None,
+            Err(e) => Some(format!("失败：{e:#}")),
+        };
+        if let Some(text) = last {
+            let v = serde_json::json!({"at": now_ms(), "text": text}).to_string();
+            if let Err(e) = self.store.kv_set(KV_LEARN_LAST, &v).await {
+                tracing::warn!(error = %e, "记录学习结果失败");
+            }
+        }
         result
     }
 
     async fn learn_and_consolidate(&self, session: SessionId, idle: Option<Duration>, force: bool) -> Result<Option<String>> {
         let lc = self.cfg.get().persona.learner.clone();
         let mut done = Vec::new();
+        let mut errors = Vec::new();
         let ckpt: i64 = self.store.kv_get(&kv_learn_ckpt(session)).await?.and_then(|v| v.parse().ok()).unwrap_or(0);
         let count = self.store.count_user_messages_since(session, ckpt).await?;
         let idle_ok = idle.is_some_and(|d| d >= Duration::from_secs(lc.idle_minutes * 60)) && count >= i64::from(lc.min_messages);
+        // 学习与整理互不阻断：学习失败时已攒下的记忆候选照常整理
         if count > 0 && (force || count >= i64::from(lc.batch_messages) || idle_ok) {
-            done.push(self.learn_batch(session, ckpt, &lc).await?);
+            match self.learn_batch(session, ckpt, &lc).await {
+                Ok(m) => done.push(m),
+                Err(e) => errors.push(format!("学习失败：{e:#}")),
+            }
         }
-        if let Some(m) = self.consolidate_memory(force, &lc).await? {
-            done.push(m);
+        match self.consolidate_memory(force, &lc).await {
+            Ok(Some(m)) => done.push(m),
+            Ok(None) => {}
+            Err(e) => errors.push(format!("记忆整理失败：{e:#}")),
         }
-        if done.is_empty() {
-            return Ok(None);
+        if done.is_empty() && !errors.is_empty() {
+            anyhow::bail!(errors.join("；"));
         }
-        Ok(Some(done.join("\n")))
+        done.extend(errors.into_iter().map(|e| format!("⚠️ {e}")));
+        Ok((!done.is_empty()).then(|| done.join("\n")))
     }
 
     async fn learn_batch(&self, session: SessionId, ckpt: i64, lc: &lyrabot_config::LearnerSettings) -> Result<String> {
         let c = self.cfg.get();
-        let entries = self.store.messages_since(session, ckpt, 200).await?;
+        // 上次解析失败时固定下来的批次上界与失败次数（"上界:次数"）：重试只学这一批，新消息留到之后
+        let fail_key = kv_learn_fail(session);
+        let failed: Option<(i64, u32)> = self.store.kv_get(&fail_key).await?.and_then(|v| {
+            let (upper, n) = v.split_once(':')?;
+            Some((upper.parse().ok()?, n.parse().ok()?))
+        });
+        let entries = self.store.messages_between(session, ckpt, failed.map(|(upper, _)| upper), 200).await?;
         let last = entries.last().map(|e| e.id).unwrap_or(ckpt);
         let msgs: Vec<Message> = entries.into_iter().filter_map(|e| serde_json::from_value(e.payload).ok()).collect();
         let kit = self.kit();
         let text = learner::transcript(&msgs, kit.persona.user_name(), kit.persona.name());
         let pcfg = c.provider(&c.persona.provider).context("persona provider 未配置")?;
         let provider = lyrabot_llm::build(pcfg)?;
-        let learned = learner::learn(provider.as_ref(), &lc.model, lc.effort, &kit.persona, &text, CancellationToken::new()).await?;
+        let Some(learned) = learner::learn(provider.as_ref(), &lc.model, lc.effort, &kit.persona, &text, CancellationToken::new()).await? else {
+            // 解析失败不等于“没学到东西”：不衰减说法库、不推进进度；同一批连续失败若干次才跳过这批
+            let failures = failed.filter(|(upper, _)| *upper == last).map_or(0, |(_, n)| n) + 1;
+            if failures < MAX_PARSE_FAILURES {
+                self.store.kv_set_for_session(session, &fail_key, &format!("{last}:{failures}")).await?;
+                return Ok(format!("学习输出无法解析（第 {failures} 次），这 {} 条消息保留到下次再学", msgs.len()));
+            }
+            self.store.kv_set_for_session(session, &fail_key, "").await?;
+            self.store.kv_set_for_session(session, &kv_learn_ckpt(session), &last.to_string()).await?;
+            return Ok(format!("学习输出连续 {failures} 次无法解析，跳过这 {} 条消息（说法库未衰减）", msgs.len()));
+        };
+        if failed.is_some() {
+            self.store.kv_set_for_session(session, &fail_key, "").await?;
+        }
         let n = learned.expressions.len();
         let (added, reinforced, removed) = self.store.learn_expressions(learned.expressions, lc.max_items).await?;
         let notes = learned.memories.into_iter().map(|m| (m.target, m.text, m.basis)).collect();
         let queued = self.store.add_memory_candidates(notes).await?;
-        if self.store.session(session).await.is_ok() {
-            self.store.kv_set(&kv_learn_ckpt(session), &last.to_string()).await?;
-        }
+        // 会话在学习期间被清理时不写回它的进度键
+        self.store.kv_set_for_session(session, &kv_learn_ckpt(session), &last.to_string()).await?;
         self.rebuild_index().await?;
         Ok(format!(
             "学习了 {} 条新消息：说法提取 {n} 条（新增 {added}，强化 {reinforced}，淘汰 {removed}），记忆候选 {queued} 条",
@@ -187,8 +238,9 @@ impl Runtime {
         let kit = self.kit();
         let out = consolidate::consolidate(provider.as_ref(), &lc.model, lc.effort, &kit.persona, &before, cands, CancellationToken::new()).await?;
         if out.files == before {
+            // 文件没变也保留说明：可能是候选因字数上限没能写入，而不是“没有需要改动的”
             self.store.drop_memory_candidates(out.processed).await?;
-            return Ok(Some(format!("整理了 {n} 条记忆候选，没有需要改动的")));
+            return Ok(Some(format!("整理了 {n} 条记忆候选：{}", tally(&out.changes))));
         }
         let _g = self.memory_lock.lock().await;
         if self.read_memory()? != before {
@@ -299,9 +351,18 @@ impl Runtime {
         let uname = self.kit().persona.user_name().to_owned();
         for (name, _) in TARGETS {
             let label = consolidate::target_label(name, &uname);
-            c.item(format!("{label} {} 条（{}/{} 字）", files[name].len(), size(name), lyrabot_persona::MEMORY_FILE_LIMIT));
+            let used = size(name);
+            let near = used * 10 >= lyrabot_persona::MEMORY_FILE_LIMIT * 9;
+            c.item(format!("{label} {} 条（{used}/{} 字）{}", files[name].len(), lyrabot_persona::MEMORY_FILE_LIMIT, if near { " ⚠️ 快满了，新记忆可能写不进去" } else { "" }));
         }
         c.item(format!("待整理的记忆候选 {pending} 条"));
+        // 最近一次后台学习或整理的结果（含文件未变、解析失败等不产生修订的情况）
+        if let Some(last) = self.store.kv_get(KV_LEARN_LAST).await?.and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok()) {
+            c.section(format!("最近一次学习｜{}", when(last["at"].as_i64().unwrap_or(0))));
+            for line in last["text"].as_str().unwrap_or_default().lines().take(4) {
+                c.line(line);
+            }
+        }
         match self.store.last_memory_revision().await? {
             Some(r) => {
                 let changes: Vec<String> = r.summary.lines().map(str::to_owned).collect();
@@ -378,7 +439,10 @@ mod tests {
     #[test]
     fn tally_counts_change_kinds() {
         let changes = vec!["新增（关于用户）：甲".to_owned(), "修改 u1：乙 → 丙".to_owned(), "新增（约定与共同的事）：丁".to_owned(), "未新增（user 已接近上限）：戊".to_owned()];
-        assert_eq!(tally(&changes), "新增 2 条、修改 1 条");
+        assert_eq!(tally(&changes), "新增 2 条、修改 1 条；1 项因记忆文件接近字数上限没有写入，可用 /learn list 记忆 查看后删掉旧条目");
         assert_eq!(tally(&[]), "没有改动");
+        // 只有超限项、文件没有变化时也要说明，不能显示成“没有改动”了事
+        let only = vec!["记忆 整理后会超过 2000 字，本次保持原样".to_owned()];
+        assert!(tally(&only).starts_with("没有改动；1 项因记忆文件接近字数上限"), "{}", tally(&only));
     }
 }

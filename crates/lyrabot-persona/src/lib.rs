@@ -75,6 +75,11 @@ impl Persona {
         format!("〔当前时间 {}〕", t.strftime("%Y-%m-%d %H:%M %a"))
     }
 
+    /// 按人设时区格式化一个毫秒时间戳（压缩稿等给历史消息标时间用），与尾注入使用同一时区。
+    pub fn time_label(&self, ms: i64) -> String {
+        Timestamp::from_millisecond(ms).map(|t| t.to_zoned(self.tz.clone()).strftime("%m-%d %H:%M").to_string()).unwrap_or_default()
+    }
+
     pub fn user_name(&self) -> &str {
         &self.user_name
     }
