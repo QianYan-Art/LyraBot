@@ -2,7 +2,7 @@
 use base64::Engine;
 use lyrabot_agent::{Tool, ToolCtx};
 use lyrabot_config::ConfigHandle;
-use lyrabot_plugins::{Host, ImageGenerate, Speak, WebSearch};
+use lyrabot_plugins::{GrokSearch, Host, ImageGenerate, Speak, WebSearch};
 use serde_json::json;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -97,6 +97,13 @@ active = "yb"
 kind = "tencent_wsa"
 url = "{base}/SearchPro"
 key_file = "yb.txt"
+[plugins.grok]
+active = "g"
+[plugins.grok.providers.g]
+kind = "openai_chat"
+url = "{base}/v1/"
+key_file = "k.txt"
+model = "grok-chat-fast"
 "#
     );
     std::fs::write(dir.join("lyrabot.toml"), cfg).unwrap();
@@ -105,6 +112,32 @@ key_file = "yb.txt"
 
 fn rand() -> usize {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos() as usize
+}
+
+/// 前置 CDN 只等 15 秒响应头：grok 请求必须流式，内容由 SSE 增量拼接。
+#[tokio::test]
+async fn grok_search_streams_and_assembles_results() {
+    let s = MockServer::start().await;
+    let delta = |t: &str| format!("data: {}\n\n", json!({"choices": [{"index": 0, "delta": {"content": t}, "finish_reason": null}]}));
+    let body = [
+        delta("[{\"title\":\"Rust 1.90\",\"url\":\"https://blog.rust-lang.org/a\","),
+        delta("\"description\":\"2025-09-18 发布\"}]"),
+        format!("data: {}\n\n", json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})),
+        "data: [DONE]\n\n".to_owned(),
+    ]
+    .concat();
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer k"))
+        .and(body_partial_json(json!({"model": "grok-chat-fast", "stream": true})))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(body))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let (h, _dir) = host(&s.uri());
+    let out = GrokSearch::new(h).call(ctx(), json!({"query": "Rust 1.90 发布日期"})).await;
+    assert!(!out.is_error, "{}", out.text);
+    assert_eq!(out.text, "1. Rust 1.90\nhttps://blog.rust-lang.org/a\n2025-09-18 发布");
 }
 
 #[tokio::test]

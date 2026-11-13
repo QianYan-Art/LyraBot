@@ -5,36 +5,48 @@ use crate::Host;
 use crate::shape::Hit;
 use async_trait::async_trait;
 use lyrabot_agent::{Concurrency, Tool, ToolCtx, ToolOutput};
-use lyrabot_core::ToolSpec;
+use lyrabot_config::{ProviderConfig, Timeouts, Transport};
+use lyrabot_core::{Message, ToolSpec};
+use lyrabot_llm::ChatRequest;
 use serde_json::{Value, json};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 const SEARCH_PROMPT: &str = "# 角色: 搜索助手\n\n以 JSON 数组形式返回搜索结果。每个结果必须包含以下字段：\n- \"title\": 字符串，结果标题\n- \"url\": 字符串，有效的 URL\n- \"description\": 字符串，20-50 字摘要\n\n仅输出有效的 JSON 数组，不包含 markdown，不包含解释。";
 const FETCH_PROMPT: &str = "# 角色: 网页内容获取器\n\n获取网页内容并转换为结构化 Markdown：\n- 保留所有标题、段落、列表、表格、代码块\n- 包含元数据头部：源 URL、标题、获取时间戳\n- 不要摘要 - 返回完整内容\n- 使用 UTF-8 编码";
 
-async fn chat(host: &Host, system: &str, user: String) -> Result<String, String> {
+/// 用内核的流式 Chat Completions 客户端请求 grok（连接复用、SSE 解析、可重试错误退避重试）。
+/// 必须流式：grok 联网检索常需 12–20 秒，前置 CDN 只等 15 秒响应头，非流式请求会被截断为 524；
+/// 流式的响应头立即返回，不受该限制。
+async fn chat(host: &Host, system: &str, user: String, cancel: &CancellationToken) -> Result<String, String> {
     let (c, p) = host.active("grok", "openai_chat")?;
-    let base = p.value_or_file(&c, "url")?;
-    let base = base.trim_end_matches('/');
-    let key = p.secret(&c, "key")?;
-    let model = p.value_or_file(&c, "model")?;
-    let body = json!({"model": model, "stream": false, "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]});
-    let resp = host
-        .http
-        .post(format!("{base}/chat/completions"))
-        .bearer_auth(key.expose())
-        .timeout(Duration::from_secs(p.int("timeout_s", 120) as u64))
-        .json(&body)
-        .send()
+    let cfg = ProviderConfig {
+        id: format!("plugin-grok:{}", p.name),
+        base_url: p.value_or_file(&c, "url")?.trim_end_matches('/').to_owned(),
+        api_key: p.secret(&c, "key")?,
+        transport: Transport::ChatCompletions,
+        user_agent: None,
+        effort_map: Default::default(),
+        models: Default::default(),
+        timeouts: Timeouts::default(),
+    };
+    let provider = lyrabot_llm::build(&cfg).map_err(|e| format!("grok 客户端初始化失败：{e}"))?;
+    let req = ChatRequest {
+        model: p.value_or_file(&c, "model")?,
+        system: vec![system.to_owned()],
+        messages: vec![Message::user(user)],
+        tools: Vec::new(),
+        effort: None,
+        max_tokens: None,
+        cache_key: None,
+    };
+    let total = Duration::from_secs(p.int("timeout_s", 120) as u64);
+    let out = tokio::time::timeout(total, provider.complete(req, cancel.clone()))
         .await
+        .map_err(|_| format!("grok 请求超时（{} 秒）", total.as_secs()))?
         .map_err(|e| format!("grok 请求失败：{e}"))?;
-    let status = resp.status();
-    let text = resp.text().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        return Err(format!("grok 返回 HTTP {status}：{}", text.chars().take(300).collect::<String>()));
-    }
-    let v: Value = serde_json::from_str(&text).map_err(|_| "grok 返回无法解析".to_owned())?;
-    v.pointer("/choices/0/message/content").and_then(Value::as_str).map(str::to_owned).ok_or_else(|| "grok 返回中没有内容".into())
+    let text = out.message.text();
+    if text.trim().is_empty() { Err("grok 返回中没有内容".into()) } else { Ok(text) }
 }
 
 fn now_beijing() -> String {
@@ -72,11 +84,11 @@ impl Tool for GrokSearch {
     fn concurrency(&self) -> Concurrency {
         Concurrency::Shared
     }
-    async fn call(&self, _ctx: ToolCtx, args: Value) -> ToolOutput {
+    async fn call(&self, ctx: ToolCtx, args: Value) -> ToolOutput {
         let Some(q) = args.get("query").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) else { return ToolOutput::err("缺少 query") };
         let platform = args.get("platform").and_then(Value::as_str).map(|p| format!("\n\n专注于平台: {p}")).unwrap_or_default();
         let user = format!("{}\n{q}{platform}\n\n以 JSON 数组形式返回 3-10 个结果。", now_beijing());
-        match chat(&self.host, SEARCH_PROMPT, user).await {
+        match chat(&self.host, SEARCH_PROMPT, user, &ctx.cancel).await {
             Ok(t) => ToolOutput::ok(render_search(q, &t)),
             Err(e) => ToolOutput::err(e),
         }
@@ -112,14 +124,14 @@ impl Tool for GrokFetch {
     fn concurrency(&self) -> Concurrency {
         Concurrency::Shared
     }
-    async fn call(&self, _ctx: ToolCtx, args: Value) -> ToolOutput {
+    async fn call(&self, ctx: ToolCtx, args: Value) -> ToolOutput {
         let Some(url) = args.get("url").and_then(Value::as_str).filter(|s| s.starts_with("http")) else { return ToolOutput::err("需要 http(s) 开头的 url") };
         let focus = args.get("focus").and_then(Value::as_str).map(str::trim).filter(|f| !f.is_empty());
         let user = match focus {
             Some(f) => format!("{url}\n\n只提取与「{f}」相关的段落、列表、表格或代码，保留原文措辞与关键数据，去掉导航、广告和页脚；不超过 3000 字。"),
             None => format!("{url}\n\n获取并返回结构化 Markdown，去掉导航、广告和页脚。"),
         };
-        match chat(&self.host, FETCH_PROMPT, user).await {
+        match chat(&self.host, FETCH_PROMPT, user, &ctx.cancel).await {
             Ok(t) => ToolOutput::ok(clip(&t, FETCH_LIMIT)),
             Err(e) => ToolOutput::err(e),
         }
