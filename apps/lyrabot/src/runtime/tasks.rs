@@ -247,7 +247,8 @@ impl Runtime {
         let s = self.store.session(session).await?;
         let spec = self.persona_spec(&c, &s, "").await?;
         let ctx = self.kernel.context(s.id).await?;
-        let mut messages: Vec<Message> = ctx.into_iter().map(|m| m.message).collect();
+        // 与正式请求共用组装逻辑：落库的尾注入原样拼回，前缀与下一轮正式请求一致
+        let mut messages = lyrabot_agent::wire_messages(ctx, None);
         messages.push(Message::user("."));
         let req = lyrabot_llm::ChatRequest {
             model: spec.model,

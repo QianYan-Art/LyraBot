@@ -5,7 +5,7 @@
 use crate::context::{self, Compaction, CtxMessage, FOLDED_TOOL, Fold};
 use crate::tool::{Concurrency, ToolCtx, ToolOutput, Toolset};
 use futures_util::future::join_all;
-use lyrabot_core::{AgentEvent, ContentPart, Effort, Message, Role, SessionId, StopReason, ToolCall, Usage};
+use lyrabot_core::{AgentEvent, Effort, Message, Role, SessionId, StopReason, ToolCall, Usage};
 use lyrabot_llm::{ChatRequest, ErrorKind, LlmError, Provider, StreamEvent};
 use lyrabot_store::{EntryKind, Store};
 use std::collections::{BTreeMap, VecDeque};
@@ -189,6 +189,18 @@ impl Kernel {
         self.emit(AgentEvent::TurnStart { session });
         let mut inputs_saved = input.is_empty();
         let mut unpersisted = input;
+        // 尾注入挂在本轮最后一条 user 输入上并随它落库（被取消后重新排队的输入先清掉旧的）；
+        // 本轮没有 user 输入时退回为只在请求里临时附加
+        let mut transient_tail = None;
+        if let Some(t) = spec.tail.as_deref().filter(|t| !t.is_empty()) {
+            for m in &mut unpersisted {
+                m.tail = None;
+            }
+            match unpersisted.iter_mut().rev().find(|m| m.role == Role::User) {
+                Some(m) => m.tail = Some(t.to_owned()),
+                None => transient_tail = Some(t),
+            }
+        }
         let mut usage = Usage::default();
         let mut media = Vec::new();
         let mut last_text = String::new();
@@ -220,7 +232,7 @@ impl Kernel {
             let req = ChatRequest {
                 model: spec.model.clone(),
                 system: spec.system.clone(),
-                messages: with_tail(ctx, spec.tail.as_deref()),
+                messages: wire_messages(ctx, transient_tail),
                 tools: spec.tools.specs(),
                 effort: spec.effort,
                 max_tokens: Some(spec.max_output_tokens),
@@ -475,19 +487,15 @@ fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 
-/// 把动态尾注入合并到最后一条 user 消息的末尾文本段（纯文本消息保持单字符串 content，含图片/视频时追加文本段；
-/// 不在 tool 消息后追加新的 user 消息，且同一轮工具续轮共用同一份 tail，兼顾缓存前缀稳定与当前时间感知）。
-fn with_tail(ctx: Vec<CtxMessage>, tail: Option<&str>) -> Vec<Message> {
-    let mut msgs: Vec<Message> = ctx.into_iter().map(|c| c.message).collect();
-    if let Some(t) = tail.filter(|t| !t.is_empty())
-        && let Some(m) = msgs.iter_mut().rev().find(|m| m.role == Role::User)
+/// 组装发给模型的消息：每条消息按 [`Message::wire`] 拼回落库的尾注入；
+/// `transient` 是本轮没有 user 输入时临时附在最后一条 user 消息上的尾注入（不落库）。
+/// 正式请求与保活共用，保证两者的前缀逐字一致。
+pub fn wire_messages(mut ctx: Vec<CtxMessage>, transient: Option<&str>) -> Vec<Message> {
+    if let Some(t) = transient
+        && let Some(c) = ctx.iter_mut().rev().find(|c| c.message.role == Role::User)
     {
-        if let Some(ContentPart::Text { text }) = m.content.last_mut() {
-            text.push_str("\n\n");
-            text.push_str(t);
-        } else {
-            m.content.push(ContentPart::text(t));
-        }
+        // 只改这次请求里的副本，不影响已落库的内容
+        c.message.tail = Some(t.to_owned());
     }
-    msgs
+    ctx.into_iter().map(|c| c.message.wire()).collect()
 }

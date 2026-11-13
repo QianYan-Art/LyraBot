@@ -4,5 +4,5 @@ pub mod context;
 mod kernel;
 mod tool;
 
-pub use kernel::{AgentError, Kernel, KernelConfig, Queues, Result, TurnOutcome, TurnSpec};
+pub use kernel::{AgentError, Kernel, KernelConfig, Queues, Result, TurnOutcome, TurnSpec, wire_messages};
 pub use tool::{Concurrency, Tool, ToolCtx, ToolOutput, ToolRegistry, Toolset};

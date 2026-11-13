@@ -243,7 +243,7 @@ async fn compaction_triggers_and_context_uses_summary() {
 }
 
 #[tokio::test]
-async fn tail_merges_into_last_user_message_and_is_not_persisted() {
+async fn tail_merges_into_last_user_message_and_is_persisted_separately() {
     let t = Sleepy::new("t", 1, Concurrency::Shared);
     let p = Fake::new(vec![calls(vec![call("1", "t", "{}")]), Message::assistant("嗯")]);
     let (k, mut spec, sid) = setup(p.clone(), vec![Arc::new(t)], 100_000).await;
@@ -259,7 +259,40 @@ async fn tail_merges_into_last_user_message_and_is_not_persisted() {
     assert_eq!(reqs[1].messages.last().unwrap().role, Role::Tool);
     assert_eq!(reqs[1].messages[0].text(), "在吗\n\n【现在 12:00】");
     let stored: Message = serde_json::from_value(k.store().branch(sid).await.unwrap()[0].payload.clone()).unwrap();
-    assert_eq!(stored.text(), "在吗");
+    assert_eq!(stored.text(), "在吗", "原话不含尾注入（学习器与检索看到的仍是原话）");
+    assert_eq!(stored.tail.as_deref(), Some("【现在 12:00】"), "尾注入随消息落库");
+}
+
+#[tokio::test]
+async fn frozen_tail_keeps_prefix_identical_across_turns() {
+    let p = Fake::new(vec![Message::assistant("在呢"), Message::assistant("一直在")]);
+    let (k, mut spec, sid) = setup(p.clone(), vec![], 100_000).await;
+    spec.tail = Some("【现在 12:00】".into());
+    k.run_turn(&spec, sid, vec![Message::user("在吗")], &Queues::default(), CancellationToken::new()).await.unwrap();
+    spec.tail = Some("【现在 12:05】".into());
+    k.run_turn(&spec, sid, vec![Message::user("还在吗")], &Queues::default(), CancellationToken::new()).await.unwrap();
+    let reqs = p.reqs();
+    // 第二轮的前缀与第一轮发出的消息逐字一致：上一轮的 user 仍带它自己的尾注入
+    assert_eq!(reqs[1].messages[0], reqs[0].messages[0]);
+    assert_eq!(reqs[1].messages[0].text(), "在吗\n\n【现在 12:00】");
+    assert_eq!(reqs[1].messages.last().unwrap().text(), "还在吗\n\n【现在 12:05】");
+    assert!(reqs.iter().flat_map(|r| &r.messages).all(|m| m.tail.is_none()), "发给模型的消息已合并尾注入");
+    // 保活与正式请求共用组装逻辑：以已落库历史组装的前缀等于下一轮请求的前缀
+    let wired = lyrabot_agent::wire_messages(k.context(sid).await.unwrap(), None);
+    assert_eq!(wired[..3], reqs[1].messages[..3]);
+}
+
+#[tokio::test]
+async fn requeued_inputs_carry_only_the_new_tail() {
+    let p = Fake::new(vec![Message::assistant("好")]);
+    let (k, mut spec, sid) = setup(p.clone(), vec![], 100_000).await;
+    spec.tail = Some("【新】".into());
+    // 模拟被取消后重新排队的输入：第一条还带着上一次的尾注入
+    let mut old = Message::user("一");
+    old.tail = Some("【旧】".into());
+    k.run_turn(&spec, sid, vec![old, Message::user("二")], &Queues::default(), CancellationToken::new()).await.unwrap();
+    let texts: Vec<String> = p.reqs()[0].messages.iter().map(Message::text).collect();
+    assert_eq!(texts, ["一", "二\n\n【新】"]);
 }
 
 /// 慢速 Provider：响应前可被取消。

@@ -46,6 +46,11 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
+    /// 这条 user 消息发送时附在末尾的动态上下文（当前时间、表达提示）。随消息落库，
+    /// 之后每次请求经 [`Message::wire`] 原样拼回，前缀与当初发出的字节一致、跨轮命中缓存；
+    /// [`Message::text`] 不含它，学习器、检索与压缩看到的仍是原话。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail: Option<String>,
 }
 
 impl Message {
@@ -63,7 +68,20 @@ impl Message {
         }
     }
     pub fn with_parts(role: Role, content: Vec<ContentPart>) -> Self {
-        Self { role, content, reasoning: None, tool_calls: Vec::new(), tool_call_id: None, is_error: false }
+        Self { role, content, reasoning: None, tool_calls: Vec::new(), tool_call_id: None, is_error: false, tail: None }
+    }
+
+    /// 发给模型的形态：把 `tail` 合并进末尾文本段（纯文本保持单段 content，含媒体时追加文本段）。
+    pub fn wire(mut self) -> Self {
+        if let Some(t) = self.tail.take().filter(|t| !t.is_empty()) {
+            if let Some(ContentPart::Text { text }) = self.content.last_mut() {
+                text.push_str("\n\n");
+                text.push_str(&t);
+            } else {
+                self.content.push(ContentPart::text(t));
+            }
+        }
+        self
     }
 
     /// 拼接全部文本片段（媒体忽略）。
@@ -89,7 +107,8 @@ impl Message {
             })
             .sum();
         let calls: usize = self.tool_calls.iter().map(|c| c.name.len() + c.arguments.chars().count()).sum();
-        body + calls + self.reasoning.as_ref().map_or(0, |r| r.chars().count())
+        let tail = self.tail.as_ref().map_or(0, |t| t.chars().count() + 2);
+        body + calls + tail + self.reasoning.as_ref().map_or(0, |r| r.chars().count())
     }
 }
 
