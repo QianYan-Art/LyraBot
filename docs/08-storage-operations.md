@@ -5,7 +5,7 @@
 
 ## 1. 存储（lyrabot-store）
 
-单个 SQLite 文件（服务器 `/var/lib/lyrabot/lyrabot.db`，WAL，`synchronous=NORMAL`）。读写都经同一个专用线程串行执行（单用户吞吐足够，且避免 `SQLITE_BUSY`）。迁移脚本内嵌，启动时按版本号顺序执行；当前 schema v4。
+单个 SQLite 文件（服务器 `/var/lib/lyrabot/lyrabot.db`，WAL，`synchronous=NORMAL`）。读写都经同一个专用线程串行执行（单用户吞吐足够，且避免 `SQLITE_BUSY`）。迁移脚本内嵌，启动时按版本号顺序执行；当前 schema v5。
 
 | 表 | 用途 |
 |---|---|
@@ -19,7 +19,7 @@
 | `memory_revisions` | 记忆整理的修订：整理前后全文与变更说明，保留最近 20 次（v4） |
 | `recall_fts` | 过往对话检索的 FTS5 trigram 索引（v4） |
 | `cron_jobs` | 定时任务（动作 JSON，一次性任务带 `once`） |
-| `quota` | QQ 主动消息额度计数 |
+| `quota` | QQ 主动消息月度额度计数（`qq_proactive:YYYY-MM`），发送前原子占用、失败归还（v5 起，旧版存在 kv 中，迁移时转入） |
 | `kv` | 杂项状态（当前人格会话、记忆快照、学习进度、检索检查点、QQ 会话、上次清理时间等） |
 
 - 清理：`/gc [天数]` 与每周一次的自动清理删除已结束且超过 N 天的会话及已归档的后台任务/专员任务会话（默认 30 天），连同其条目、信件、插话、检索索引与 kv；当前会话、排队或运行中的执行者/专员任务、被较新会话引用的历史与还有未确认汇报的会话保留（长期记忆文件独立存放于 `<memory_dir>`，不受会话 GC 影响）。删除较多时执行 `wal_checkpoint(TRUNCATE)` 与 `VACUUM`。
@@ -29,7 +29,7 @@
 ## 2. 长期运行与稳定性
 
 - 资源：tokio `worker_threads=2` + mimalloc；常驻内存约 26–37 MB（Hermes 网关曾约 240 MB）。
-- systemd：`Type=simple`、`Restart=always`（`RestartSec=5`）、`MemoryMax=400M`（仅作失控保护）；未实现 sd_notify 看门狗（见 `09-backlog.md`）。
+- systemd：`Type=notify`、`WatchdogSec=60`、`Restart=always`（`RestartSec=5`）、`MemoryMax=400M`（仅作失控保护）。`apps/lyrabot/src/watchdog.rs` 直接写 `NOTIFY_SOCKET`（无依赖）：进入服务循环发 `READY=1`，退出前发 `STOPPING=1`；独立任务每 20 秒探活，QQ 接收循环 180 秒内有推进（心跳、收包、重连退避都算）且存储线程 5 秒内响应才发 `WATCHDOG=1`，否则停发，约 60 秒后由 systemd 杀掉重启。探活不看主处理循环（`/compact` 等命令会在其中正常等待模型数分钟）。本地 CLI 没有 `NOTIFY_SOCKET`，全部为空操作。
 - 观测：`/status` 汇总版本、上下文、缓存命中、内存与运行时长；tracing 记录每轮用量、学习与清理结果。
 - 启动顺序：配置与迁移 → 恢复被中断的后台任务 → 补写中断的记忆整理 → 装载未确认汇报 → 接入平台与定时任务。
 

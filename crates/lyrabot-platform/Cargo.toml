@@ -8,6 +8,7 @@ license.workspace = true
 async-trait = "0.1.92"
 base64 = "0.23.1"
 futures-util = "0.3.34"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 jiff = "0.2.39"
 lyrabot-config = { version = "0.1.0", path = "../lyrabot-config" }
 lyrabot-core = { version = "0.1.0", path = "../lyrabot-core" }
@@ -24,6 +25,7 @@ tracing = "0.1.44"
 workspace = true
 
 [dev-dependencies]
+png = "0.18.1"
 rusqlite = "0.41.1"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 wiremock = "0.6.5"

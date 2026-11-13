@@ -16,7 +16,7 @@
 - 思考等级：参数名 `reasoning_effort`，只接受 `low/high/max`。配置 `effort_map`：low→low、medium→high、high→high、xhigh→max、max→max。不存在"关闭思考"。
 - 思考回放：带工具调用的 assistant 消息回放时携带模型返回的真实 `reasoning_content`；缺失时补单个空格，不伪造内容。
 - 缓存与连接复用：命中数在 `usage.prompt_tokens_details.cached_tokens`。`lyrabot_llm::build` 按 `ProviderConfig` 缓存复用 `Provider` 实例及其底层 HTTP/TLS 连接池（`/reload` 配置变更后自动重建）；内核按会话携带稳定的 `prompt_cache_key`（`lyrabot-s-<session>`），每次模型请求完成时记录 `prompt_tokens`、`cached_tokens`、命中率与距该会话上次请求的间隔 `idle_s`。不把五小时额度窗口当缓存时间。
-- 自检：`/models` 返回的 `context_length`、模态、effort 可选值用于 `lyrabot --check` 比对配置与可用列表。
+- 自检：`lyrabot --check` 只核对配置里的模型 ID 是否出现在 `/models` 列表中；`/models` 返回的 `context_length`、模态与 effort 可选值是人工核对后写进配置的，自检不逐项比对。
 - 模态：`k3-256k` 输入只有文字与图片（`supports_video_in=false`）；`kimi-for-coding`、`kimi-for-coding-highspeed`、`k3`、`k3.1-pro` 系列支持视频。视频以 `{"type":"video_url","video_url":{"url":"data:video/mp4;base64,…"}}` 发送，服务器实测通过（2 秒测试视频 566 输入 token）。
 - 媒体编码按目标模型在模型目录中的 `vision` / `video` 能力处理：本地 `file://` 图片（≤10 MB）与视频（≤20 MB）在请求时才转为 data URI；模型不支持视频、或视频超限时不发画面，改为一句提示“需要了解内容时用 watch_video 查看 <路径>”（见 `06-tools-plugins.md` 第 2 节）。
 

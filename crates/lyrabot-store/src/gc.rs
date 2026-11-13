@@ -19,6 +19,8 @@ pub struct GcReport {
     pub bytes_before: i64,
     pub bytes_after: i64,
     pub deleted_ids: Vec<SessionId>,
+    /// 删除已提交、但之后的整理（检查点与 VACUUM）失败时的错误；`deleted_ids` 仍然有效
+    pub maintenance_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -117,19 +119,29 @@ impl Store {
                     bytes_before,
                     bytes_after: 0,
                     deleted_ids: ids,
+                    maintenance_error: None,
                 })
             })
             .await?;
-        // VACUUM 不能在事务内执行；删得少时跳过以免无谓的整库重写
+        // VACUUM 不能在事务内执行；删得少时跳过以免无谓的整库重写。
+        // 删除已经提交：整理失败只记在报告里，调用方仍需按 deleted_ids 清理内存状态
         let mut report = report;
-        report.bytes_after = self
+        let maintained = self
             .call(move |c| {
                 if report_needs_vacuum(c)? {
                     c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")?;
                 }
                 Ok(db_bytes(c)?)
             })
-            .await?;
+            .await;
+        match maintained {
+            Ok(bytes) => report.bytes_after = bytes,
+            Err(e) => {
+                tracing::warn!(error = %e, "会话已删除，但数据库整理失败");
+                report.bytes_after = report.bytes_before;
+                report.maintenance_error = Some(e.to_string());
+            }
+        }
         Ok(report)
     }
 

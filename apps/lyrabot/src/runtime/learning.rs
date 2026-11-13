@@ -4,6 +4,7 @@
 
 use super::*;
 use lyrabot_command::LearnScope;
+use lyrabot_core::memory_file::read_memory_file;
 use lyrabot_persona::consolidate::{self, Candidate, TARGETS};
 use std::collections::BTreeMap;
 
@@ -33,10 +34,15 @@ impl Runtime {
         self.cfg.get().persona.memory_dir.join(format!("{name}.md"))
     }
 
-    fn read_memory(&self) -> BTreeMap<String, Vec<String>> {
+    /// 读取全部记忆文件；不存在的文件视为空，其他读取错误直接返回，不会被当成空文件再覆盖。
+    fn read_memory(&self) -> Result<BTreeMap<String, Vec<String>>> {
         TARGETS
             .iter()
-            .map(|(name, _)| (name.to_string(), consolidate::entries(&std::fs::read_to_string(self.memory_path(name)).unwrap_or_default())))
+            .map(|(name, _)| {
+                let path = self.memory_path(name);
+                let text = read_memory_file(&path).with_context(|| format!("读取记忆文件 {}", path.display()))?;
+                Ok((name.to_string(), consolidate::entries(&text)))
+            })
             .collect()
     }
 
@@ -57,7 +63,7 @@ impl Runtime {
     pub(super) fn finish_interrupted_consolidation(&self, rev: &lyrabot_store::MemoryRevision) -> Result<bool> {
         let before: BTreeMap<String, String> = serde_json::from_str(&rev.before)?;
         let after: BTreeMap<String, String> = serde_json::from_str(&rev.after)?;
-        let current = self.read_memory();
+        let current = self.read_memory()?;
         let mut incomplete = false;
         for (name, list) in &current {
             let is = |m: &BTreeMap<String, String>| m.get(name).map(|t| consolidate::entries(t)).unwrap_or_default() == *list;
@@ -171,7 +177,7 @@ impl Runtime {
         let c = self.cfg.get();
         let before = {
             let _g = self.memory_lock.lock().await;
-            self.read_memory()
+            self.read_memory()?
         };
         let originals: Vec<(String, String, String)> = cands.iter().map(|c| (c.target.clone(), c.text.clone(), c.basis.clone())).collect();
         let pcfg = c.provider(&c.persona.provider).context("persona provider 未配置")?;
@@ -185,7 +191,7 @@ impl Runtime {
             return Ok(Some(format!("整理了 {n} 条记忆候选，没有需要改动的")));
         }
         let _g = self.memory_lock.lock().await;
-        if self.read_memory() != before {
+        if self.read_memory()? != before {
             return Ok(Some("整理期间记忆被修改过，本轮放弃，候选保留到下次".into()));
         }
         let render = |m: &BTreeMap<String, Vec<String>>| {
@@ -235,7 +241,7 @@ impl Runtime {
                 }
             }
             LearnCmd::List(LearnScope::Memory) => {
-                let files = self.read_memory();
+                let files = self.read_memory()?;
                 let uname = self.kit().persona.user_name().to_owned();
                 let mut c = Card::new("📝", "长期记忆");
                 for (name, prefix) in TARGETS {
@@ -285,7 +291,7 @@ impl Runtime {
     async fn learn_overview(&self) -> Result<String> {
         let on = if self.learning_enabled().await? { "开启" } else { "暂停" };
         let exprs = self.store.expressions().await?.len();
-        let files = self.read_memory();
+        let files = self.read_memory()?;
         let size = |name: &str| files[name].iter().map(|e| e.chars().count()).sum::<usize>();
         let pending = self.store.memory_candidates().await?.len();
         let mut c = Card::new("🌱", "学习与记忆");
@@ -328,7 +334,7 @@ impl Runtime {
         let Some((name, _)) = TARGETS.iter().find(|(_, p)| p.to_string() == prefix) else { return Ok(card::warn(format!("没有 {id}"))) };
         let Some(i) = idx.parse::<usize>().ok().and_then(|n| n.checked_sub(1)) else { return Ok(card::warn(format!("没有 {id}"))) };
         let _g = self.memory_lock.lock().await;
-        let mut list = self.read_memory().remove(*name).unwrap_or_default();
+        let mut list = self.read_memory()?.remove(*name).unwrap_or_default();
         if i >= list.len() {
             let label = consolidate::target_label(name, self.kit().persona.user_name());
             return Ok(card::warn(format!("「{label}」里没有 {id}，发 /learn list 记忆 查看编号")));
@@ -348,7 +354,7 @@ impl Runtime {
         let before: BTreeMap<String, String> = serde_json::from_str(&rev.before)?;
         let after: BTreeMap<String, String> = serde_json::from_str(&rev.after)?;
         for (name, text) in &after {
-            let current = std::fs::read_to_string(self.memory_path(name)).unwrap_or_default();
+            let current = read_memory_file(&self.memory_path(name))?;
             if consolidate::entries(&current) != consolidate::entries(text) {
                 return Ok(card::warn("记忆在那次整理之后又被改过，为免覆盖新的改动，没有撤销；可用 /learn list 记忆 查看后按编号删除"));
             }

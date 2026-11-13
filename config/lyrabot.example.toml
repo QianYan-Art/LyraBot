@@ -48,7 +48,7 @@ video = true
 [persona]
 model = "k3-256k"
 effort = "low"
-assets_dir = "persona"
+assets_dir = "assets/persona"
 # memory_dir = "data/memory"   # 默认 <data_dir>/memory
 
 [persona.keepalive]
@@ -61,7 +61,7 @@ default_model = "kimi-for-coding"
 default_effort = "high"
 max_concurrent = 3
 context_window = 131072        # 后台执行者（worker 与专员）上下文窗口上限（128K，主会话的一半）
-worker_prompt = "agents/worker.md"
+worker_prompt = "assets/agents/worker.md"
 worker_tools = ["shell", "fs_read", "fs_write", "fs_patch", "fs_search", "todo", "skill_view", "web_search", "grok_search", "grok_fetch", "image_generate"]
 
 [orchestra.specialists.ops]
@@ -132,15 +132,15 @@ key_file = "secrets/grok.key"
 model = "grok-chat-fast"
 timeout_s = 120
 
-# QQ 官方机器人（docs/07-platform-commands.md 第 2 节）；secret 放 secrets/qq.secret，allowed_users 填主人的 user_openid
-[platforms.qq]
-app_id = "<QQ_APP_ID>"
-secret_file = "secrets/qq.secret"
-allowed_users = ["<你的 user_openid>"]
-reply_window_min = 60       # 被动回复有效期（分钟）
-max_replies = 5             # 单条消息最多被动回复次数
-proactive_monthly_quota = 4 # 每月主动消息额度，用尽后延迟到用户下次说话
-inbox_dir = "/var/lib/lyrabot/media/inbox"
+# QQ 官方机器人（docs/07-platform-commands.md 第 2 节）（本地命令行用不到，接入 QQ 时取消注释）；secret 放 secrets/qq.secret，allowed_users 填主人的 user_openid
+# [platforms.qq]
+# app_id = "<QQ_APP_ID>"
+# secret_file = "secrets/qq.secret"
+# allowed_users = ["<你的 user_openid>"]
+# reply_window_min = 60       # 被动回复有效期（分钟）
+# max_replies = 5             # 单条消息最多被动回复次数
+# proactive_monthly_quota = 4 # 每月主动消息额度，用尽后延迟到用户下次说话
+# inbox_dir = "/var/lib/lyrabot/media/inbox"
 
 # 抖音外部服务（docs/06-tools-plugins.md 第 3 节）。服务端允许的调用方为 lyrabot 用户与 lyrabot.service
 [douyin]

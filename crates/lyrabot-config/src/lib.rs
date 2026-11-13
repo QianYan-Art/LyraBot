@@ -142,9 +142,16 @@ impl ConfigHandle {
         self.current.load_full()
     }
     pub fn reload(&self) -> Result<Arc<Config>> {
-        let cfg = Arc::new(Config::load(&self.path)?);
-        self.current.store(cfg.clone());
+        let cfg = self.load()?;
+        self.publish(cfg.clone());
         Ok(cfg)
+    }
+    /// 只读取并校验配置文件，不替换当前配置；与依赖它的资产一起验证通过后再 [`publish`](Self::publish)。
+    pub fn load(&self) -> Result<Arc<Config>> {
+        Ok(Arc::new(Config::load(&self.path)?))
+    }
+    pub fn publish(&self, cfg: Arc<Config>) {
+        self.current.store(cfg);
     }
     pub fn path(&self) -> &Path {
         &self.path

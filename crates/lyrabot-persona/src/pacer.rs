@@ -120,10 +120,11 @@ fn merge_to(mut parts: Vec<String>, max: usize) -> Vec<String> {
     parts
 }
 
-/// 发送下一段前的停顿：模拟打字，基础 400ms + 每字 30ms，上限 2.5s。
+/// 发送下一段前的停顿：模拟打字，基础 400ms + 每字 30ms，限定在 1s～2.5s。
+/// 下限 1s：QQ 对间隔过短（约 0.3s 内）的相邻消息偶尔会合并成一个气泡。
 pub fn segment_delay(next: &str) -> Duration {
     let ms = 400 + 30 * next.chars().count() as u64;
-    Duration::from_millis(ms.min(2500))
+    Duration::from_millis(ms.clamp(1000, 2500))
 }
 
 #[cfg(test)]
@@ -176,7 +177,9 @@ mod tests {
 
     #[test]
     fn delay_bounds() {
-        assert_eq!(segment_delay(""), Duration::from_millis(400));
+        assert_eq!(segment_delay(""), Duration::from_millis(1000));
+        assert_eq!(segment_delay("在呢～"), Duration::from_millis(1000));
+        assert_eq!(segment_delay(&"字".repeat(30)), Duration::from_millis(1300));
         assert_eq!(segment_delay(&"字".repeat(200)), Duration::from_millis(2500));
     }
 }

@@ -24,6 +24,8 @@ pub(crate) struct Courier {
     state: Arc<Mutex<State>>,
     /// 补发串行进行：后到的触发等前一次结束后再读一遍发件箱，不会漏掉期间新入队的消息
     flushing: tokio::sync::Mutex<()>,
+    /// 唤醒常驻补发任务；补发期间的多次唤醒合并为一次
+    wake: tokio::sync::Notify,
 }
 
 /// 一次发送尝试的结果。
@@ -48,7 +50,20 @@ fn text_body(text: &str) -> Value {
 
 impl Courier {
     pub(crate) fn new(api: Arc<Api>, store: Store, state: Arc<Mutex<State>>) -> Self {
-        Self { api, store, state, flushing: tokio::sync::Mutex::new(()) }
+        Self { api, store, state, flushing: tokio::sync::Mutex::new(()), wake: tokio::sync::Notify::new() }
+    }
+
+    /// 请求补发（新的被动窗口打开时调用）。
+    pub(crate) fn request_flush(&self) {
+        self.wake.notify_one();
+    }
+
+    /// 常驻补发任务：每次被唤醒补发一遍，补发期间的唤醒会在结束后再触发一遍。
+    pub(crate) async fn run_flusher(self: Arc<Self>) {
+        loop {
+            self.wake.notified().await;
+            self.flush().await;
+        }
     }
 
     fn openid(&self) -> &str {
@@ -189,9 +204,18 @@ impl Courier {
 
     /// 选择通道发送一段载荷；没有通道时返回 `NoRoute`，由调用方决定是否入发件箱。
     async fn route(&self, body: Value) -> Result<Sent, SendError> {
-        let quota = self.api.cfg().proactive_monthly_quota;
-        let used: u32 = self.store.kv_get(&quota_key()).await.ok().flatten().and_then(|v| v.parse().ok()).unwrap_or(0);
-        let route = self.state.lock().expect("qq 状态锁中毒").reply.route(now_ms(), used < quota);
+        // 被动/事件锚点优先；轮到主动消息时再原子占用本月额度，并发发送也不会超额
+        let mut route = self.state.lock().expect("qq 状态锁中毒").reply.route(now_ms(), true);
+        let key = quota_key();
+        if route == Route::Proactive {
+            let cap = self.api.cfg().proactive_monthly_quota;
+            if !self.store.quota_take(&key, cap).await.unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "读取主动消息额度失败，按额度用尽处理");
+                false
+            }) {
+                route = Route::Defer;
+            }
+        }
         let openid = self.openid().to_owned();
         let res = match &route {
             Route::Passive { msg_id, seq } => self.api.send_c2c(&openid, body, Some(("msg_id", msg_id, *seq))).await,
@@ -200,17 +224,26 @@ impl Courier {
             Route::Defer => return Ok(Sent::NoRoute),
         };
         match res {
-            Ok(_) => {
-                if route == Route::Proactive {
-                    let _ = self.store.kv_set(&quota_key(), &(used + 1).to_string()).await;
+            Ok(v) => {
+                // HTTP 200 不等于送达：正常响应会带消息 id。缺失时只记警告不重发，避免重复投递
+                if v.get("id").and_then(Value::as_str).is_none_or(str::is_empty) {
+                    tracing::warn!(?route, response = %v, "QQ 发送返回成功但没有消息 id，可能未送达");
                 }
                 Ok(Sent::Delivered)
             }
-            Err(e) if route == Route::Proactive && e.kind == SendErrorKind::Forbidden => {
-                tracing::warn!(error = %e.message, "主动消息被拒绝");
-                Ok(Sent::NoRoute)
+            Err(e) => {
+                // 没发出去的主动消息不计入额度（发送中途被取消时少归还一次，偏保守）
+                if route == Route::Proactive
+                    && let Err(re) = self.store.quota_release(&key).await
+                {
+                    tracing::warn!(error = %re, "归还主动消息额度失败");
+                }
+                if route == Route::Proactive && e.kind == SendErrorKind::Forbidden {
+                    tracing::warn!(error = %e.message, "主动消息被拒绝");
+                    return Ok(Sent::NoRoute);
+                }
+                Err(e)
             }
-            Err(e) => Err(e),
         }
     }
 
@@ -220,7 +253,7 @@ impl Courier {
         let ft = file_type_for(path);
         let file_info = match self.api.upload(&openid, path, ft).await {
             Ok(f) => f,
-            // QQ 对语音格式的要求未经实测确认：语音被拒时退回按文件发送，保证送达
+            // WAV 已实测可作语音条；其他格式可能被拒，此时退回按文件发送，保证送达
             Err(e) if ft == 3 && matches!(e.kind, SendErrorKind::BadFormat | SendErrorKind::Unknown) => {
                 tracing::warn!(error = %e.message, "语音上传失败，改按文件发送");
                 self.api.upload(&openid, path, 4).await?

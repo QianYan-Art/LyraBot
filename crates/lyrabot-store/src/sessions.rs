@@ -177,6 +177,20 @@ impl Store {
         .await
     }
 
+    /// 读取单个条目。
+    pub async fn entry(&self, id: EntryId) -> Result<Entry> {
+        self.call(move |c| {
+            let (session_id, parent_id, kind, payload, tokens, created_at) = c
+                .query_row("SELECT session_id,parent_id,kind,payload,tokens,created_at FROM entries WHERE id=?1", [id], |r| {
+                    Ok((r.get::<_, SessionId>(0)?, r.get::<_, Option<EntryId>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?))
+                })
+                .optional()?
+                .ok_or_else(|| StoreError::NotFound(format!("条目 {id}")))?;
+            Ok(Entry { id, session_id, parent_id, kind: kind.parse()?, payload: serde_json::from_str(&payload)?, tokens, created_at })
+        })
+        .await
+    }
+
     /// 会话自身 id 大于 `after` 的消息条目（按 id 升序，至多 `limit` 条，取最新的）。
     pub async fn messages_since(&self, session: SessionId, after: EntryId, limit: u32) -> Result<Vec<Entry>> {
         self.call(move |c| {

@@ -98,7 +98,7 @@ async fn gateway_and_send_contract() {
     qq.send(Outbound::text("第二段")).await.unwrap();
     let img = dir.join("a.png");
     std::fs::write(&img, b"\x89PNG\r\n\x1a\n").unwrap();
-    qq.send(Outbound { text: String::new(), media: vec![img], reply_to: None }).await.unwrap();
+    qq.send(Outbound { text: String::new(), media: vec![img] }).await.unwrap();
     let reqs = http.received_requests().await.unwrap();
     let sent: Vec<Value> = reqs.iter().filter(|r| r.url.path() == "/v2/users/OPENID1/messages").map(|r| serde_json::from_slice(&r.body).unwrap()).collect();
     assert_eq!(sent.len(), 3);
@@ -142,15 +142,38 @@ async fn proactive_quota_then_defer_until_next_inbound() {
     let sent: Vec<Value> = http.received_requests().await.unwrap().iter().filter(|r| r.url.path().ends_with("/messages")).map(|r| serde_json::from_slice(&r.body).unwrap()).collect();
     assert_eq!(sent.len(), 1);
     assert!(sent[0].get("msg_id").is_none() && sent[0]["content"] == "后台任务完成了");
-    let used: Vec<String> = store.call(|c| {
-        let mut st = c.prepare("SELECT value FROM kv WHERE key LIKE 'qq_proactive:%'")?;
-        let v = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+    let used: Vec<u32> = store.call(|c| {
+        let mut st = c.prepare("SELECT used FROM quota WHERE key LIKE 'qq_proactive:%'")?;
+        let v = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<u32>>>()?;
         Ok(v)
     }).await.unwrap();
-    assert_eq!(used, vec!["1".to_owned()], "主动消息计数持久化");
+    assert_eq!(used, vec![1], "主动消息计数持久化");
     let queued = store.outbox_list("qq").await.unwrap();
     assert_eq!(queued.len(), 1, "被延迟的消息落库");
     assert_eq!(queued[0].payload["text"], "定时提醒");
+}
+
+#[tokio::test]
+async fn failed_proactive_send_returns_quota() {
+    let http = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/token")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token": "T", "expires_in": 7200}))).mount(&http).await;
+    Mock::given(method("POST")).and(path("/v2/users/OPENID1/messages")).respond_with(ResponseTemplate::new(503)).mount(&http).await;
+    let cfg = QqConfig {
+        app_id: "APP".into(),
+        secret: Secret::new("S"),
+        allowed_users: vec!["OPENID1".into()],
+        api_base: http.uri(),
+        token_url: format!("{}/token", http.uri()),
+        reply_window_min: 60,
+        max_replies: 5,
+        proactive_monthly_quota: 1,
+        inbox_dir: std::env::temp_dir(),
+    };
+    let store = Store::in_memory().unwrap();
+    let qq = QqPlatform::new(cfg, store.clone());
+    assert!(qq.send(Outbound::text("后台任务完成了")).await.is_err(), "服务端错误如实上报");
+    let used: u32 = store.call(|c| Ok(c.query_row("SELECT coalesce(sum(used), 0) FROM quota", [], |r| r.get(0))?)).await.unwrap();
+    assert_eq!(used, 0, "没发出去的主动消息不占额度");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -225,4 +248,46 @@ async fn deferred_survives_restart_and_flushes_on_inbound() {
     assert!(left[0].payload["media"].as_str().unwrap().ends_with(".png") && left[1].payload["text"] == "后台结果三");
     runner.abort();
     let _ = std::fs::remove_file(&img);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbound_keeps_arrival_order_while_attachments_download() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ws_port = listener.local_addr().unwrap().port();
+    let http = MockServer::start().await;
+    Mock::given(method("POST")).and(path("/token")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"access_token": "T", "expires_in": 7200}))).mount(&http).await;
+    Mock::given(method("GET")).and(path("/gateway")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"url": format!("ws://127.0.0.1:{ws_port}")}))).mount(&http).await;
+    // 图片下载较慢：后面的纯文字消息不得越过它先交给运行时
+    Mock::given(method("GET")).and(path("/slow.png")).respond_with(ResponseTemplate::new(200).set_body_bytes(b"png".to_vec()).set_delay(Duration::from_millis(600))).mount(&http).await;
+    let dir = std::env::temp_dir().join(format!("lyrabot-qq-order-{}", std::process::id()));
+    let cfg = QqConfig {
+        app_id: "APP".into(),
+        secret: Secret::new("S"),
+        allowed_users: vec!["OPENID1".into()],
+        api_base: http.uri(),
+        token_url: format!("{}/token", http.uri()),
+        reply_window_min: 60,
+        max_replies: 5,
+        proactive_monthly_quota: 0,
+        inbox_dir: dir.clone(),
+    };
+    let qq = Arc::new(QqPlatform::new(cfg, Store::in_memory().unwrap()));
+    let (tx, mut inbox) = mpsc::channel(8);
+    let runner = {
+        let qq = qq.clone();
+        tokio::spawn(async move { qq.run(tx).await })
+    };
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+    send(&mut ws, json!({"op": 10, "d": {"heartbeat_interval": 30000}})).await;
+    assert_eq!(recv_json(&mut ws).await["op"], 2);
+    let mut with_image = c2c(1, "M1", "OPENID1", "看图");
+    with_image["d"]["attachments"] = json!([{"content_type": "image/png", "url": format!("{}/slow.png", http.uri())}]);
+    send(&mut ws, with_image).await;
+    send(&mut ws, c2c(2, "M2", "OPENID1", "/stop")).await;
+    let first = tokio::time::timeout(Duration::from_secs(5), inbox.recv()).await.unwrap().unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(5), inbox.recv()).await.unwrap().unwrap();
+    assert_eq!((first.msg_id.as_deref(), second.msg_id.as_deref()), (Some("M1"), Some("M2")));
+    runner.abort();
+    let _ = std::fs::remove_dir_all(&dir);
 }

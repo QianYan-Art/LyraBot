@@ -78,7 +78,7 @@ mkdir -p secrets && echo "<your-key>" > secrets/kimi.key
 ./target/release/lyrabot --config lyrabot.toml --no-stream  # 模拟 QQ 的分段发送
 ```
 
-正式运行：`lyrabot --config /etc/lyrabot/lyrabot.toml --qq`（需要配置 `[platforms.qq]`）。服务器部署、更新与目录布局见 [`deploy/README.md`](deploy/README.md)。
+正式运行：`lyrabot --config /etc/lyrabot/lyrabot.toml --qq`（取消示例配置中 `[platforms.qq]` 的注释并填写 AppID、主人 openid 与 `secrets/qq.secret`）。服务器部署、更新与目录布局见 [`deploy/README.md`](deploy/README.md)。
 
 开发检查与 CI 一致：
 

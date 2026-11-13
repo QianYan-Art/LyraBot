@@ -10,6 +10,7 @@ mod learning;
 mod mailbox;
 mod migrations;
 mod outbox;
+mod quota;
 mod recall;
 mod sessions;
 

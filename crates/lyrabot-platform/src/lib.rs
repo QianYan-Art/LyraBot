@@ -38,7 +38,6 @@ impl Inbound {
 pub struct Outbound {
     pub text: String,
     pub media: Vec<PathBuf>,
-    pub reply_to: Option<String>,
 }
 
 impl Outbound {
@@ -79,6 +78,10 @@ pub trait Platform: Send + Sync {
     /// 运行接收循环，直到连接终止或通道关闭。
     async fn run(&self, inbox: mpsc::Sender<Inbound>) -> anyhow_like::Result<()>;
     async fn send(&self, out: Outbound) -> SendResult;
+    /// 接收循环是否仍在推进（看门狗探活用）。不需要监测的平台保持默认。
+    fn alive(&self) -> bool {
+        true
+    }
     /// 流式增量（仅 `caps().streaming` 为真时调用）
     async fn stream_delta(&self, _text: &str) {}
     /// 一轮流式输出结束

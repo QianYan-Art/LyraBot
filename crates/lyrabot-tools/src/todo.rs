@@ -82,4 +82,31 @@ impl Tool for Todo {
             None => ToolOutput::ok(render(lists.get(&ctx.session).map(Vec::as_slice).unwrap_or_default())),
         }
     }
+
+    fn forget_sessions(&self, ids: &[SessionId]) {
+        let mut lists = self.lists.lock().expect("todo 锁中毒");
+        for id in ids {
+            lists.remove(id);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_util::sync::CancellationToken;
+
+    fn ctx(session: SessionId) -> ToolCtx {
+        ToolCtx { session, call_id: "c".into(), cancel: CancellationToken::new() }
+    }
+
+    #[tokio::test]
+    async fn lists_are_per_session_and_dropped_after_gc() {
+        let t = Todo::default();
+        t.call(ctx(1), json!({"items": [{"text": "查日志", "status": "doing"}]})).await;
+        assert!(t.call(ctx(1), json!({})).await.text.contains("[>] 查日志"));
+        assert_eq!(t.call(ctx(2), json!({})).await.text, "（清单为空）");
+        t.forget_sessions(&[1]);
+        assert_eq!(t.call(ctx(1), json!({})).await.text, "（清单为空）", "编号复用后不能看到旧清单");
+    }
 }

@@ -5,7 +5,7 @@ use crate::util::arg_str;
 use async_trait::async_trait;
 use lyrabot_agent::{Tool, ToolCtx, ToolOutput};
 use lyrabot_core::ToolSpec;
-use lyrabot_core::memory_file::{MEMORY_FILE_LIMIT, MEMORY_SEP as SEP, parse_memory_entries as entries, render_memory_entries};
+use lyrabot_core::memory_file::{MEMORY_FILE_LIMIT, parse_memory_entries as entries, read_memory_file, render_memory_entries, sanitize_entry};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -72,7 +72,7 @@ pub fn apply(mut list: Vec<String>, action: &str, text: Option<&str>, old: Optio
     };
     let msg = match action {
         "add" => {
-            let t = text.ok_or("add 需要 text")?.trim().replace(SEP, "\n");
+            let t = sanitize_entry(text.ok_or("add 需要 text")?);
             if list.contains(&t) {
                 return Err("已有完全相同的条目".into());
             }
@@ -81,7 +81,7 @@ pub fn apply(mut list: Vec<String>, action: &str, text: Option<&str>, old: Optio
         }
         "replace" => {
             let i = find(&list, old.ok_or("replace 需要 old")?)?;
-            list[i] = text.ok_or("replace 需要 text")?.trim().to_owned();
+            list[i] = sanitize_entry(text.ok_or("replace 需要 text")?);
             "已替换".to_owned()
         }
         "remove" => {
@@ -109,7 +109,12 @@ impl Tool for Memory {
         };
         let action = arg_str(&args, "action").unwrap_or("list");
         let _g = self.lock.lock().await;
-        let current = entries(&tokio::fs::read_to_string(&target.file).await.unwrap_or_default());
+        let file = target.file.clone();
+        let current = match tokio::task::spawn_blocking(move || read_memory_file(&file)).await {
+            Ok(Ok(text)) => entries(&text),
+            Ok(Err(e)) => return ToolOutput::err(format!("读取记忆文件失败：{e}")),
+            Err(e) => return ToolOutput::err(format!("读取记忆文件失败：{e}")),
+        };
         if action == "list" {
             if current.is_empty() {
                 return ToolOutput::ok("（暂无条目）");
@@ -121,10 +126,19 @@ impl Tool for Memory {
                 if let Some(dir) = target.file.parent() {
                     let _ = tokio::fs::create_dir_all(dir).await;
                 }
+                // 先写临时文件再改名，中途退出不会留下半个文件
                 let body = render_memory_entries(&list);
-                match tokio::fs::write(&target.file, body).await {
+                let tmp = target.file.with_extension("md.tmp");
+                let written = match tokio::fs::write(&tmp, body).await {
+                    Ok(()) => tokio::fs::rename(&tmp, &target.file).await,
+                    Err(e) => Err(e),
+                };
+                match written {
                     Ok(()) => ToolOutput::ok(format!("{msg}（新会话或压缩后生效）")),
-                    Err(e) => ToolOutput::err(format!("写入失败：{e}")),
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&tmp).await;
+                        ToolOutput::err(format!("写入失败：{e}"))
+                    }
                 }
             }
             Err(e) => ToolOutput::err(e),

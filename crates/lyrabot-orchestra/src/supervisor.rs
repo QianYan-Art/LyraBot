@@ -18,6 +18,8 @@ const SUMMARY_LIMIT: usize = 1200;
 const INTERRUPTED_SUMMARY: &str = "服务重启时这个任务还没做完，已有进展保存在它的会话里。需要的话用 agent_ctl continue 续接；续接时它会先核对已经做过的部分，不重复外部操作。";
 /// fork 模式下为主对话角色那次 delegate 调用补的工具结果。
 const FORK_PLACEHOLDER: &str = "（这件事已交给后台执行者处理）";
+/// 分叉点那条 assistant 消息里同批的其他调用，在分叉时还没有结果
+const FORK_SIBLING_PENDING: &str = "（分叉时这项调用还没有结果）";
 const FORK_INSTRUCTION: &str = "〔以上是主对话角色与用户的对话，供你了解来龙去脉。从现在起你是后台执行者，不扮演角色，不对用户直接说话，只完成下面的任务并按系统提示写汇报。〕";
 
 struct Inner {
@@ -150,8 +152,15 @@ impl Supervisor {
                 let mut input = Vec::new();
                 let body = match (req.context, note) {
                     (ContextMode::Fork, _) => {
-                        // 分叉点是主对话角色那条带 delegate 调用的消息，先补上结果保持消息结构合法
-                        input.push(Message::tool_result(&req.parent_call_id, FORK_PLACEHOLDER, false));
+                        // 分叉点是主对话角色那条带 delegate 调用的消息（同批工具结果在整批执行完才落库），
+                        // 先为其中每个调用补上结果，保持消息结构合法；同批可能还有其他调用
+                        let calls = match fork_entry {
+                            Some(e) => serde_json::from_value::<Message>(store.entry(e).await.map_err(err)?.payload)
+                                .map(|m| m.tool_calls.into_iter().map(|c| c.id).collect())
+                                .unwrap_or_default(),
+                            None => Vec::new(),
+                        };
+                        input.extend(fork_results(calls, &req.parent_call_id));
                         format!("{FORK_INSTRUCTION}\n\n任务：{task}{}", note.map(|n| format!("\n补充：{n}")).unwrap_or_default())
                     }
                     (ContextMode::Brief, Some(n)) => format!("任务：{task}\n\n背景：{n}"),
@@ -542,4 +551,18 @@ impl Supervisor {
         let row = inner.kernel.store().session(h.id).await.map_err(|e| e.to_string())?;
         build_turn_spec(&c, &row, h, &inner.tools, &inner.providers, inner.extras.as_ref())
     }
+}
+
+/// 分叉点各调用的占位结果（按调用顺序）；分叉点读不到调用时只补本次 delegate。
+fn fork_results(calls: Vec<String>, delegate_call: &str) -> Vec<Message> {
+    if !calls.iter().any(|c| c == delegate_call) {
+        return vec![Message::tool_result(delegate_call, FORK_PLACEHOLDER, false)];
+    }
+    calls
+        .into_iter()
+        .map(|id| {
+            let text = if id == delegate_call { FORK_PLACEHOLDER } else { FORK_SIBLING_PENDING };
+            Message::tool_result(&id, text, false)
+        })
+        .collect()
 }

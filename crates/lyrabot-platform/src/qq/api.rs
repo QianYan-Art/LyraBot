@@ -16,6 +16,10 @@ pub const INLINE_UPLOAD_MAX: usize = 9 * 1024 * 1024;
 /// 入站附件流式下载的大小上限（50 MB）与并发上限。
 pub const DOWNLOAD_MAX_BYTES: u64 = 50 * 1024 * 1024;
 pub const DOWNLOAD_CONCURRENCY: usize = 2;
+/// 控制类请求（token、网关地址、发文字）的超时。客户端默认 120 秒是给富媒体上传的；
+/// 建连路径上的请求用更短的超时，网关接收循环的进度间隔才有确定上界（见 `qq::STALL`）。
+pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 
 static DL_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -75,12 +79,16 @@ fn err(kind: SendErrorKind, message: impl Into<String>) -> SendError {
     SendError { kind, message: message.into() }
 }
 
+fn too_large(bytes: u64) -> SendError {
+    err(SendErrorKind::TooLong, format!("文件 {:.1} MB 超过当前支持的 9 MB 上传上限", bytes as f64 / 1048576.0))
+}
+
 impl Api {
     pub fn new(cfg: QqConfig) -> Self {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(120))
+            .timeout(UPLOAD_TIMEOUT)
             .build()
             .expect("构建 HTTP 客户端");
         Self { cfg, http, token: Mutex::new(None), dl_sem: tokio::sync::Semaphore::new(DOWNLOAD_CONCURRENCY) }
@@ -103,7 +111,7 @@ impl Api {
             return Ok(t.clone());
         }
         let body = json!({"appId": self.cfg.app_id, "clientSecret": self.cfg.secret.expose()});
-        let resp = self.http.post(&self.cfg.token_url).json(&body).send().await.map_err(|e| err(SendErrorKind::Transient, format!("获取 token 失败：{e}")))?;
+        let resp = self.http.post(&self.cfg.token_url).timeout(CONTROL_TIMEOUT).json(&body).send().await.map_err(|e| err(SendErrorKind::Transient, format!("获取 token 失败：{e}")))?;
         let v: Value = resp.json().await.map_err(|e| err(SendErrorKind::Transient, format!("token 响应无法解析：{e}")))?;
         let t = v.get("access_token").and_then(Value::as_str).ok_or_else(|| err(SendErrorKind::Forbidden, "token 响应缺少 access_token（检查 AppID/Secret）"))?.to_owned();
         let expires: u64 = match &v["expires_in"] {
@@ -120,9 +128,9 @@ impl Api {
         *self.token.lock().await = None;
     }
 
-    async fn request(&self, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Value, SendError> {
+    async fn request(&self, method: reqwest::Method, path: &str, body: Option<&Value>, timeout: Duration) -> Result<Value, SendError> {
         let token = self.token().await?;
-        let mut rb = self.http.request(method, format!("{}{path}", self.cfg.api_base)).header("Authorization", format!("QQBot {token}"));
+        let mut rb = self.http.request(method, format!("{}{path}", self.cfg.api_base)).timeout(timeout).header("Authorization", format!("QQBot {token}"));
         if let Some(b) = body {
             rb = rb.json(b);
         }
@@ -142,7 +150,7 @@ impl Api {
     }
 
     pub async fn gateway_url(&self) -> Result<String, SendError> {
-        let v = self.request(reqwest::Method::GET, "/gateway", None).await?;
+        let v = self.request(reqwest::Method::GET, "/gateway", None, CONTROL_TIMEOUT).await?;
         v.get("url").and_then(Value::as_str).map(str::to_owned).ok_or_else(|| err(SendErrorKind::Unknown, "网关地址为空"))
     }
 
@@ -155,14 +163,32 @@ impl Api {
             }
             None => body["msg_seq"] = json!(1),
         }
-        self.request(reqwest::Method::POST, &format!("/v2/users/{openid}/messages"), Some(&body)).await
+        self.request(reqwest::Method::POST, &format!("/v2/users/{openid}/messages"), Some(&body), CONTROL_TIMEOUT).await
     }
 
-    /// 上传本地文件（内联 base64），返回 file_info。
+    /// 上传本地文件（内联 base64），返回 file_info。图片先按 [`super::media::shrink_image`] 压缩（不改动原文件）。
     pub async fn upload(&self, openid: &str, path: &Path, file_type: u32) -> Result<String, SendError> {
-        let bytes = tokio::fs::read(path).await.map_err(|e| err(SendErrorKind::NotFound, format!("读取 {} 失败：{e}", path.display())))?;
+        let read_err = |e: std::io::Error| err(SendErrorKind::NotFound, format!("读取 {} 失败：{e}", path.display()));
+        // 读取前先按大小拦截：图片可能被压缩到上限内，最多读到解码上限；其他文件超过上传上限直接报错
+        let size = tokio::fs::metadata(path).await.map_err(read_err)?.len();
+        let read_cap = if file_type == 1 { super::media::DECODE_MAX_BYTES } else { INLINE_UPLOAD_MAX as u64 };
+        if size > read_cap {
+            return Err(too_large(size));
+        }
+        let mut bytes = tokio::fs::read(path).await.map_err(read_err)?;
+        if file_type == 1 {
+            let raw = bytes;
+            let before = raw.len();
+            bytes = tokio::task::spawn_blocking(move || super::media::shrink_image(&raw).ok_or(raw))
+                .await
+                .map_err(|e| err(SendErrorKind::Unknown, format!("图片预处理失败：{e}")))?
+                .unwrap_or_else(|raw| raw);
+            if bytes.len() != before {
+                tracing::info!(path = %path.display(), before, after = bytes.len(), "上传前已压缩图片");
+            }
+        }
         if bytes.len() > INLINE_UPLOAD_MAX {
-            return Err(err(SendErrorKind::TooLong, format!("文件 {:.1} MB 超过当前支持的 9 MB 上传上限", bytes.len() as f64 / 1048576.0)));
+            return Err(too_large(bytes.len() as u64));
         }
         let mut body = json!({
             "file_type": file_type,
@@ -172,7 +198,7 @@ impl Api {
         if file_type == 4 {
             body["file_name"] = json!(path.file_name().and_then(|n| n.to_str()).unwrap_or("file"));
         }
-        let v = self.request(reqwest::Method::POST, &format!("/v2/users/{openid}/files"), Some(&body)).await?;
+        let v = self.request(reqwest::Method::POST, &format!("/v2/users/{openid}/files"), Some(&body), UPLOAD_TIMEOUT).await?;
         v.get("file_info")
             .or_else(|| v.pointer("/data/file_info"))
             .and_then(Value::as_str)

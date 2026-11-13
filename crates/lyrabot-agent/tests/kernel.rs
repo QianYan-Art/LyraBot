@@ -243,7 +243,7 @@ async fn compaction_triggers_and_context_uses_summary() {
 }
 
 #[tokio::test]
-async fn tail_is_sent_only_on_trailing_user_and_not_persisted() {
+async fn tail_merges_into_last_user_message_and_is_not_persisted() {
     let t = Sleepy::new("t", 1, Concurrency::Shared);
     let p = Fake::new(vec![calls(vec![call("1", "t", "{}")]), Message::assistant("嗯")]);
     let (k, mut spec, sid) = setup(p.clone(), vec![Arc::new(t)], 100_000).await;

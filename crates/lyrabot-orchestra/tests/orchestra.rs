@@ -162,6 +162,24 @@ async fn fork_inherits_persona_branch_with_valid_structure() {
 }
 
 #[tokio::test]
+async fn fork_pads_results_for_every_call_in_the_batch() {
+    let mut e = env(3, 10).await;
+    e.store.append(e.persona, EntryKind::Message, serde_json::to_value(Message::user("查报错，顺便看下天气")).unwrap(), 1).await.unwrap();
+    let mut call = Message::with_parts(Role::Assistant, vec![]);
+    call.tool_calls.push(ToolCall { id: "call_w".into(), name: "web_search".into(), arguments: "{}".into() });
+    call.tool_calls.push(ToolCall { id: "call_d".into(), name: "delegate".into(), arguments: "{}".into() });
+    e.store.append(e.persona, EntryKind::Message, serde_json::to_value(&call).unwrap(), 1).await.unwrap();
+
+    e.sup.delegate(req(e.persona, "查报错原因", ContextMode::Fork, Target::Worker)).await.unwrap();
+    next(&mut e.reports).await;
+    let sent = e.fake.requests.lock().unwrap()[0].clone();
+    let roles: Vec<Role> = sent.messages.iter().map(|m| m.role).collect();
+    assert_eq!(roles, vec![Role::User, Role::Assistant, Role::Tool, Role::Tool, Role::User], "同批每个调用都要有结果");
+    let ids: Vec<_> = sent.messages[2..4].iter().map(|m| m.tool_call_id.clone().unwrap()).collect();
+    assert_eq!(ids, ["call_w", "call_d"]);
+}
+
+#[tokio::test]
 async fn brief_and_model_validation() {
     let mut e = env(3, 10).await;
     let mut bad = req(e.persona, "x", ContextMode::Brief, Target::Worker);

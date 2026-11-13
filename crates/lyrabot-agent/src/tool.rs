@@ -46,6 +46,8 @@ pub trait Tool: Send + Sync {
         Concurrency::Exclusive
     }
     async fn call(&self, ctx: ToolCtx, args: serde_json::Value) -> ToolOutput;
+    /// 会话被清理后丢弃按会话保存的内存状态（会话编号可能被复用）。无状态工具保持默认。
+    fn forget_sessions(&self, _ids: &[SessionId]) {}
 }
 
 /// 全局工具注册表；会话按工具名白名单（toolset）取子集。
@@ -82,6 +84,13 @@ impl ToolRegistry {
 
     pub fn all(&self) -> Toolset {
         Toolset { tools: self.tools.clone() }
+    }
+
+    /// 通知所有工具丢弃已清理会话的状态。
+    pub fn forget_sessions(&self, ids: &[SessionId]) {
+        for t in self.tools.values() {
+            t.forget_sessions(ids);
+        }
     }
 }
 

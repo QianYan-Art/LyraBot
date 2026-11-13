@@ -11,6 +11,7 @@ impl Runtime {
         let r = self.store.gc_sessions(days, keep).await?;
         self.sup.forget(&r.deleted_ids);
         self.kernel.forget_sessions(&r.deleted_ids);
+        self.tools.forget_sessions(&r.deleted_ids);
         let mb = |b: i64| b as f64 / 1048576.0;
         let mut c = Card::new("🧹", "清理完成");
         c.line(format!("结束超过 {days} 天的会话"))
@@ -18,6 +19,9 @@ impl Runtime {
             .item(format!("数据库 {:.2} → {:.2} MB", mb(r.bytes_before), mb(r.bytes_after)));
         if r.kept_referenced > 0 {
             c.item(format!("{} 个仍被较新的会话引用，暂时保留", r.kept_referenced));
+        }
+        if let Some(e) = &r.maintenance_error {
+            c.item(format!("数据库整理失败（已删除的会话不受影响）：{e}"));
         }
         Ok(c.build())
     }
@@ -204,8 +208,10 @@ impl Runtime {
                 AgentAction::Say(t) => self.sup.continue_worker(id, &t, self.session()).await.map_or_else(card::warn, card::ok),
             },
             Command::Reload => {
-                let c = self.cfg.reload()?;
+                // 配置与人格资产都装载成功后才一起替换，任一失败都保持原状
+                let c = self.cfg.load()?;
                 let kit = PersonaKit::load(&c, &self.sup, &self.memory_lock)?;
+                self.cfg.publish(c);
                 *self.kit.lock().expect("kit 锁中毒") = Arc::new(kit);
                 self.state().reset_keepalive(true);
                 Card::new("✅", "配置与人格资产已重新加载").hint("改动在新会话或 /compact 后生效").build()
@@ -222,6 +228,10 @@ impl Runtime {
         let had_pending = !std::mem::take(&mut st.pending).is_empty();
         if st.phase == Phase::Debouncing {
             st.phase = Phase::Idle;
+        }
+        if let Some(d) = st.delivering.take() {
+            d.cancel();
+            return true;
         }
         match st.running.take() {
             Some(c) => {

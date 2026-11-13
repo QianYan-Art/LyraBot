@@ -2,7 +2,7 @@
 //!
 //! 主对话角色的模型（如 k3-256k）不支持视频输入时，入站视频不直接发给主对话角色，改由其按需调用本工具：
 //! 用 `[tools] video_model`（默认 kimi-for-coding）看视频，把文字结果交回，主对话角色再用自己的口吻回复。
-//! 视频必须位于媒体目录内；超过内联上限时先用 ffmpeg 压到 480p、每秒 2 帧（结果缓存在媒体目录，随媒体清理回收）。
+//! 视频必须位于媒体目录内；超过内联上限或时长超过 10 分钟时先用 ffmpeg 压到 480p、每秒 2 帧（结果缓存在媒体目录，随媒体清理回收）。
 
 use crate::Host;
 use async_trait::async_trait;
@@ -51,15 +51,25 @@ impl WatchVideo {
         if !pcfg.models.get(&model).is_some_and(|m| m.video) {
             return Err(format!("看视频的模型 {model} 不在模型目录中或不支持视频"));
         }
-        // 超长视频只看前 MAX_SECONDS 秒，结果里如实说明
+        // 超长视频只看前 MAX_SECONDS 秒（与文件大小无关），结果里如实说明；读不出时长时同样走截取，保证成本上界。
+        // 确认未超长且体积在内联上限内的才原样发送
         let mut scope = String::new();
-        let data = match local_data_uri(path_str(&path)?, VIDEO_INLINE_MAX) {
-            Ok(d) => d,
-            Err(Inline::Missing) => return Err("视频文件已不存在（媒体缓存可能已清理）".into()),
-            Err(Inline::TooLarge) => {
+        let secs = probe_seconds(&path).await;
+        let inline = if secs.is_none_or(|s| s > f64::from(MAX_SECONDS)) {
+            None
+        } else {
+            match local_data_uri(path_str(&path)?, VIDEO_INLINE_MAX) {
+                Ok(d) => Some(d),
+                Err(Inline::Missing) => return Err("视频文件已不存在（媒体缓存可能已清理）".into()),
+                Err(Inline::TooLarge) => None,
+            }
+        };
+        let data = match inline {
+            Some(d) => d,
+            None => {
                 let small = compress(&path, &c.tools.media_dir, cancel).await?;
                 let minutes = MAX_SECONDS / 60;
-                scope = match probe_seconds(&path).await {
+                scope = match secs {
                     Some(secs) if secs > f64::from(MAX_SECONDS) => format!("（视频约 {} 分钟，只看了前 {minutes} 分钟）\n", (secs / 60.0).round()),
                     Some(_) => String::new(),
                     // 读不出时长时不确定是否被截取，如实说明
@@ -122,10 +132,22 @@ impl Drop for TempFile {
     }
 }
 
+/// 压缩结果的缓存文件名：文件名 + 源路径哈希 + 大小与修改时间，同名的不同视频或被替换过的视频不会命中旧缓存。
+fn cache_name(src: &Path) -> Result<String, String> {
+    use std::hash::{Hash, Hasher};
+    let meta = std::fs::metadata(src).map_err(|e| format!("读取视频信息失败：{e}"))?;
+    // 修改时间取纳秒精度：同一秒内原地替换成同样大小的视频也能区分
+    let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    src.hash(&mut h);
+    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("video");
+    Ok(format!("{stem}-{:016x}-{}-{mtime}", h.finish(), meta.len()))
+}
+
 /// 用 ffmpeg 压到 480p、每秒 2 帧、去掉音轨；同一视频的压缩结果复用。
 /// 每次压缩写独立的临时文件、完成后原子改名发布，同一视频并发调用也不会互相覆盖。
 async fn compress(src: &Path, media_dir: &Path, cancel: &CancellationToken) -> Result<PathBuf, String> {
-    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("video");
+    let stem = cache_name(src)?;
     let out = media_dir.join("video-cache").join(format!("{stem}-480p.mp4"));
     if out.is_file() {
         return Ok(out);
@@ -173,6 +195,21 @@ impl Tool for WatchVideo {
 #[cfg(test)]
 mod tests {
     use super::within;
+
+    #[test]
+    fn cache_name_distinguishes_same_stem_and_replaced_content() {
+        let root = std::env::temp_dir().join(format!("lyrabot-vcache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        std::fs::write(root.join("a/clip.mp4"), b"one").unwrap();
+        std::fs::write(root.join("b/clip.mp4"), b"one").unwrap();
+        let a = super::cache_name(&root.join("a/clip.mp4")).unwrap();
+        assert_ne!(a, super::cache_name(&root.join("b/clip.mp4")).unwrap(), "不同目录的同名视频");
+        std::fs::write(root.join("a/clip.mp4"), b"longer").unwrap();
+        assert_ne!(a, super::cache_name(&root.join("a/clip.mp4")).unwrap(), "内容被替换");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn only_files_inside_media_dir() {

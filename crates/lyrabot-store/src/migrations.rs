@@ -117,6 +117,13 @@ CREATE TABLE memory_revisions (
 );
 CREATE VIRTUAL TABLE recall_fts USING fts5(text, session UNINDEXED, entry UNINDEXED, role UNINDEXED, at UNINDEXED, tokenize='trigram');
 "#,
+    // v5：QQ 主动消息计数从 kv 迁到 v1 预留的 quota 表（原子占用），迁移后删除 kv 旧键
+    r#"
+INSERT INTO quota(key, used, updated_at)
+    SELECT key, CAST(value AS INTEGER), CAST(strftime('%s','now') AS INTEGER) * 1000 FROM kv WHERE key LIKE 'qq_proactive:%'
+    ON CONFLICT(key) DO UPDATE SET used = MAX(quota.used, excluded.used);
+DELETE FROM kv WHERE key LIKE 'qq_proactive:%';
+"#,
 ];
 
 pub fn run(conn: &mut Connection) -> rusqlite::Result<()> {
@@ -140,5 +147,19 @@ mod tests {
         super::run(&mut c).unwrap();
         let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
         assert_eq!(v as usize, super::MIGRATIONS.len());
+    }
+
+    #[test]
+    fn v5_moves_proactive_count_from_kv_to_quota() {
+        let mut c = rusqlite::Connection::open_in_memory().unwrap();
+        for sql in &super::MIGRATIONS[..4] {
+            c.execute_batch(sql).unwrap();
+        }
+        c.pragma_update(None, "user_version", 4).unwrap();
+        c.execute_batch("INSERT INTO kv VALUES('qq_proactive:2026-11','3'), ('other','x');").unwrap();
+        super::run(&mut c).unwrap();
+        let used: i64 = c.query_row("SELECT used FROM quota WHERE key='qq_proactive:2026-11'", [], |r| r.get(0)).unwrap();
+        let left: i64 = c.query_row("SELECT count(*) FROM kv", [], |r| r.get(0)).unwrap();
+        assert_eq!((used, left), (3, 1), "计数迁入 quota，kv 只剩无关键");
     }
 }

@@ -1,6 +1,7 @@
 //! lyrabot 入口：解析参数、装载配置、装配各层并运行。
 
 mod runtime;
+mod watchdog;
 
 use anyhow::{Context, Result};
 use lyrabot_config::ConfigHandle;
@@ -92,7 +93,14 @@ async fn serve(runtime: Arc<Runtime>, platform: Arc<dyn Platform>) -> Result<()>
     let (tx, mut rx) = mpsc::channel(64);
     let p = platform.clone();
     let mut reader = tokio::spawn(async move { p.run(tx).await });
-    runtime.clone().attach(platform);
+    runtime.clone().attach(platform.clone());
+    let notifier = watchdog::Notifier::from_env().map(Arc::new);
+    if let Some(n) = &notifier {
+        n.send("READY=1");
+        if let Some(every) = watchdog::interval() {
+            watchdog::spawn(n.clone(), every, platform, runtime.store().clone());
+        }
+    }
     let result = loop {
         tokio::select! {
             msg = rx.recv() => match msg {
@@ -112,6 +120,9 @@ async fn serve(runtime: Arc<Runtime>, platform: Arc<dyn Platform>) -> Result<()>
             }
         }
     };
+    if let Some(n) = &notifier {
+        n.send("STOPPING=1");
+    }
     runtime.shutdown().await;
     reader.abort();
     result

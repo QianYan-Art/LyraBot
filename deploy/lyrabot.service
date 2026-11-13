@@ -4,7 +4,11 @@ After=network-online.target lyrabot-douyin.service
 Wants=network-online.target
 
 [Service]
-Type=simple
+# notify：进入服务循环时报 READY=1；看门狗心跳只在 QQ 接收循环仍在推进、存储线程能响应时发出，
+# 卡死超过 WatchdogSec 由 systemd 杀掉并按 Restart=always 拉起
+Type=notify
+NotifyAccess=main
+WatchdogSec=60
 User=lyrabot
 Group=lyrabot
 WorkingDirectory=/var/lib/lyrabot

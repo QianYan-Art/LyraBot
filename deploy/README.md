@@ -9,7 +9,7 @@
 | `/etc/lyrabot/lyrabot.toml` | 配置（`/provider` 会写回，故目录属运行用户） | lyrabot 640 |
 | `/etc/lyrabot/secrets/` | kimi、元宝、生图、grok、QQ、Komari、邮件 SSH key 与配置 | lyrabot 600 |
 | `/var/lib/lyrabot/` | 运行用户家目录；数据库（`lyrabot.db`）、记忆、表情包、媒体、工作目录、制作目录 `workspace/starlibrary_covers` | lyrabot |
-| `/etc/systemd/system/lyrabot.service` | `lyrabot --qq`，User=lyrabot，Restart=always，日志进 journald | root |
+| `/etc/systemd/system/lyrabot.service` | `lyrabot --qq`，User=lyrabot，`Type=notify` + `WatchdogSec=60`，Restart=always，日志进 journald | root |
 | `/etc/sudoers.d/lyrabot` | `lyrabot ALL=(ALL) NOPASSWD: ALL` | root 440 |
 | `/usr/local/bin/rtk` | RTK 1.2.0（官方 x86_64 musl 包；升级方法见下文“升级 RTK”，升级时临时保留的 `rtk.prev` 验证后可删） | root |
 | `/opt/lyrabot-douyin`、`/var/lib/lyrabot-douyin`、`/run/lyrabot-douyin/login.sock` | 抖音服务（`lyrabot-douyin.service`，运行用户 douyin-runner，源码同步在本仓库 `ops/douyin/`） | douyin-runner |

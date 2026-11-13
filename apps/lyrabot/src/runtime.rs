@@ -153,6 +153,8 @@ struct State {
     phase: Phase,
     /// 当前进行中的一轮
     running: Option<CancellationToken>,
+    /// 当前正在分段投递的回复；/stop 时取消，停掉尚未发出的分段与媒体（已发出的保留）
+    delivering: Option<CancellationToken>,
     /// 等待合并进下一轮的消息
     pending: Vec<Message>,
     first_pending: Option<Instant>,
@@ -485,10 +487,12 @@ impl Runtime {
         turn_session: SessionId,
         turn_epoch: u64,
     ) {
+        let stop_delivery = CancellationToken::new();
         let acked = {
             let mut st = self.state();
             st.phase = Phase::Delivering;
             st.running = None;
+            st.delivering = Some(stop_delivery.clone());
             let discard = std::mem::take(&mut st.discard_unconsumed);
             // 内核队列里还没来得及注入的插话/追问：被打断时并回缓冲，/stop 时一并丢弃
             let mut leftover = self.queues.take_all();
@@ -532,10 +536,11 @@ impl Runtime {
         if let Err(e) = self.store.ack_mail(acked).await {
             tracing::warn!(error = %e, "确认后台汇报失败，重启后可能重复转述");
         }
-        self.deliver(result).await;
+        self.deliver(result, &stop_delivery).await;
         let has_pending = {
             let mut st = self.state();
             st.phase = Phase::Idle;
+            st.delivering = None;
             st.media_inflight.clear();
             st.has_work()
         };
@@ -544,7 +549,7 @@ impl Runtime {
         }
     }
 
-    async fn deliver(&self, result: Result<TurnOutcome>) {
+    async fn deliver(&self, result: Result<TurnOutcome>, stop: &CancellationToken) {
         let Some(platform) = self.platform.get() else { return };
         let streaming = platform.caps().streaming;
         let o = match result {
@@ -577,7 +582,13 @@ impl Runtime {
             let segs = pacer::segments(&o.text, self.pacer_cfg().max_segments);
             for (i, seg) in segs.iter().enumerate() {
                 if i > 0 {
-                    tokio::time::sleep(pacer::segment_delay(seg)).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(pacer::segment_delay(seg)) => {}
+                        _ = stop.cancelled() => return,
+                    }
+                }
+                if stop.is_cancelled() {
+                    return;
                 }
                 if let Err(e) = platform.send(Outbound::text(seg.clone())).await {
                     tracing::warn!(?e, "分段发送失败");
@@ -586,8 +597,15 @@ impl Runtime {
             }
         }
         if !o.media.is_empty() {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            let _ = platform.send(Outbound { text: String::new(), media: o.media, reply_to: None }).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                _ = stop.cancelled() => return,
+            }
+            // 媒体逐个上传可能较久：/stop 时放弃尚未发出的部分（已发出的保留）
+            tokio::select! {
+                _ = platform.send(Outbound { text: String::new(), media: o.media }) => {}
+                _ = stop.cancelled() => {}
+            }
         }
     }
 

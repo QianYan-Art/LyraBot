@@ -17,7 +17,7 @@
 | `06-tools-plugins.md` | 内置工具、可插拔提供方、视频代看、抖音外部服务 |
 | `07-platform-commands.md` | 平台层（QQ 官方、CLI、OneBot 预留）与聊天命令 |
 | `08-storage-operations.md` | 存储、长期运行与稳定性、构建部署、调试约定 |
-| `09-backlog.md` | 待做方向、推迟事项、未采纳方案与未验证项 |
+| `09-backlog.md` | 待做方向、推迟事项与未采纳方案 |
 | `../deploy/README.md` | 服务器布局、安装、更新、回退与运维步骤 |
 
 ## 2. 总体结构
@@ -95,4 +95,4 @@ LyraBot/
 └─ docs/
 ```
 
-依赖方向（单向）：`core ← llm ← agent ← orchestra ← persona`；`tools/plugins/platform/command/douyin` 只依赖 `core`（及必要的 `config`、`store`、`agent`），由 `apps/lyrabot` 装配。禁止反向依赖。
+依赖方向（单向）：`core ← llm ← agent`，`orchestra` 与 `persona` 并列建在 `agent` 之上、互不依赖；`tools/plugins/platform/command/douyin` 只依赖 `core`（及必要的 `config`、`store`、`agent`、`llm`），由 `apps/lyrabot` 装配。禁止反向依赖。
