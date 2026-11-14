@@ -36,7 +36,8 @@ impl Mail {
         let spec = ToolSpec {
             name: "mail".into(),
             description: "操作邮件 VPS（可托管多个域名，以查询结果为准）。\
-                list_mailboxes 列出邮箱：没有明确指定域名时不要传 domain 和 limit；若 matched 大于返回数说明被截断。\
+                list_mailboxes 列出邮箱：没有明确指定域名时不要传 domain 和 limit；若 matched 大于返回数说明被截断；aliases 是别名及其实际邮箱。\
+                别名可以直接作 email 读信（读的是实际邮箱，两者共用同一个收件箱），也可以作 from_email 发信；回复发给别名的邮件时用该别名作发件人。\
                 read 读最新邮件（默认 1 封），可用 from_contains/subject_contains/body_contains 筛选；找验证码加 require_code，找验证链接加 require_link。\
                 list_attachments / fetch_attachment 取附件（附件文件会自动随回复发出）。验证链接较长时会导出成 txt 文件一并发出，文字里只能逐字原样给出链接，不得改写或打码。\
                 send / reply / forward / trash / delete 是写操作：只执行任务里明确要求的那一封、那个收件人；失败或超时不要重试，先用 read 核实结果。\
