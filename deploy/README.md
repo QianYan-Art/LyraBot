@@ -14,6 +14,7 @@
 | `/usr/local/bin/rtk` | RTK 1.2.0（官方 x86_64 musl 包；升级方法见下文“升级 RTK”，升级时临时保留的 `rtk.prev` 验证后可删） | root |
 | `/opt/lyrabot-douyin`、`/var/lib/lyrabot-douyin`、`/run/lyrabot-douyin/login.sock` | 抖音服务（`lyrabot-douyin.service`，运行用户 douyin-runner，源码同步在本仓库 `ops/douyin/`） | douyin-runner |
 | `/etc/lyrabot-douyin.env` | `DOUYIN_ALLOWED_UID`（lyrabot 的 UID 997）、`DOUYIN_GATEWAY_UNIT=lyrabot.service`、`DOUYIN_EXPECTED_ACCOUNT` | root 600 |
+| `/etc/systemd/system/egress-shaping.service` | 整机公网出口整形（本仓库 `deploy/egress-shaping.service`）：eth0 根 qdisc 为 CAKE 2.7 Mbit，开机自启 | root |
 
 运行用户 `lyrabot`（uid 997）附加组：`blogsync`（博客同步脚本、`/etc/blog-sync/proxy.key` 与博客站点目录共用的组）、`lyrabot-douyin`（抖音 socket）。
 
@@ -49,9 +50,24 @@ ssh root@<server> 'chmod 755 /opt/lyrabot/bin/lyrabot.new && cp -a /opt/lyrabot/
 
 `pwsh lyrabot-upload.ps1`（配置 `lyrabot-publish.json`，字段见 `ops/douyin/lyrabot-publish.example.json`；以 root 登录服务器，调用本仓库 `ops/douyin/stage_release.py prepare` 与服务器 `/opt/lyrabot-douyin/stage_release.py install`，入库到 `/var/lib/lyrabot-douyin/releases/<release_id>/`）。
 
+服务器出口只有 3 Mbps，抖音网页上传实际约 330 KB/s：563 MB 约 27 分钟，而上传最多等待 55 分钟（`content.py` 的 `UPLOAD_TIMEOUT`），所以成片宜控制在约 600 MB 以内（OpenFilm 导出选 H.264、画质「标准」或「高」）。原片换了内容（哪怕编号不变）后，旧封面 ID 会因“封面关联的原视频已变化”失效，需要重新导入并配对封面。
+
+## 出口整形
+
+套餐带宽 3 Mbps，超出部分会被云平台直接丢包；不整形时大文件上传把上行占满，TCP 重传率达 15–20%，抖音网页上传会中途报“上传失败”。`egress-shaping.service` 把 eth0 出口整形到 2.7 Mbit（CAKE，按连接公平分配，上传期间 SSH、QQ 网关、博客与 frps 仍可用，排队延迟约 1–3 ms），对整机所有服务生效。CAKE 统计里的 drops 是本机队列管理的主动丢包（BBR 不按丢包降速，会体现为 TCP 重传），不是线路丢包。
+
+```bash
+install -m 644 egress-shaping.service /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now egress-shaping
+tc -s qdisc show dev eth0          # 应为 cake bandwidth 2700Kbit
+systemctl disable --now egress-shaping   # 撤销，恢复内核默认 qdisc
+```
+
+改速率时改单元中的 `2700kbit` 后 `systemctl restart egress-shaping`；换套餐带宽时同步调整。
+
 ## 切换与清理记录
 
 - 2026-11-08 01:36（北京时间）切换：抖音服务 gateway 单元名改为可配置、允许 UID 改为运行用户、博客代理 key 属主改为运行用户，停用 hermes-gateway 并启用新服务。
 - 2026-11-08 08:58：抖音账号改过抖音号后，`DOUYIN_EXPECTED_ACCOUNT` 同步更新后状态为 logged_in。以后再改抖音号时同样要改 `/etc/lyrabot-douyin.env` 并重启 lyrabot-douyin。需要人工操作浏览器时：root 执行 `python3 /opt/lyrabot-douyin/manual_window.py open`，本机 `ssh -N -L 16085:127.0.0.1:6085 root@<server>` 后打开 `http://127.0.0.1:16085/vnc.html`；浏览器空闲 180 秒会关闭（黑屏），需持续发送 status 保活。
 - 2026-11-08：清理残留——删除服务器 `/tmp` 中 Hermes 时期的上传暂存、测试目录与 `/root` 下引用 hermes_cli 的检查脚本；博客目录中两个仍属原 hermes UID 的文件改为 `root:blogsync`（与其余文章一致）；博客同步脚本注释去掉 hermes。
 - 2026-11-10：项目内部命名与部署路径全面统一为 `lyrabot`（消除旧代号 `qya` 与特定人设服务名 `tangyuge`）：二进制、crate 前缀、配置、数据库、环境变量、服务器目录（`/opt/lyrabot`、`/etc/lyrabot`、`/var/lib/lyrabot`、`/var/log/lyrabot`）、systemd 单元（`lyrabot.service`）、运行用户（`lyrabot`，UID 997 不变）及抖音外部服务（`lyrabot-douyin`）全部统一。
+- 2026-11-16：第四期两次上传在中途被平台判失败（880 MB 原片，分别在约 30 分钟和 9 分钟时；降码率后的 563 MB 也在 6 分钟时失败），原因是上行超出 3 Mbps 后被硬性限速丢包。启用 `egress-shaping.service` 后 563 MB 一次传完并发布。

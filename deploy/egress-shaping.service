@@ -1,0 +1,14 @@
+[Unit]
+# 公网出口按套餐 3Mbps 整形：限在 2.7Mbit 以下，避免超速被云平台限速丢包（大文件上传会因此失败）
+Description=Egress traffic shaping on eth0 (CAKE 2.7Mbit, below 3Mbps plan)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/tc qdisc replace dev eth0 root cake bandwidth 2700kbit besteffort triple-isolate
+ExecStop=/usr/sbin/tc qdisc del dev eth0 root
+
+[Install]
+WantedBy=multi-user.target
