@@ -154,9 +154,6 @@ $Python = Resolve-WorkingPython
 $OpsDir = if ($rawCfg.ops_dir) { [string]$rawCfg.ops_dir } elseif (Test-Path -LiteralPath (Join-Path $PSScriptRoot "stage_release.py")) { $PSScriptRoot } else { throw "配置缺少 ops_dir（指向仓库 ops/douyin 目录）" }
 $StageScript  = Join-Path $OpsDir "stage_release.py"
 
-if (-not (Test-Path -LiteralPath $ConfigPath)) {
-    throw "找不到配置文件: $ConfigPath"
-}
 if (-not (Test-Path -LiteralPath $Python)) {
     throw "找不到 Python 环境: $Python"
 }
@@ -179,6 +176,19 @@ $ServerSource = if ($cfg.server_source) { $cfg.server_source } else { "/opt/lyra
 $Destination  = "$($cfg.user)@$($cfg.host)"
 $SshPort      = [int]$cfg.port
 
+# 把作品编号换算成 QQ 里说的期号：ep00 -> 序栞，ep04 -> 第四栞，ep12-r2 -> 第十二栞（编号 ep12-r2）；换算不了就直接用编号。
+function Get-EpisodeLabel([string]$Id) {
+    if ($Id -notmatch '^ep(\d{2})(-.+)?$') { return $Id }
+    $n = [int]$Matches[1]
+    $suffix = if ($Matches[2]) { "（编号 $Id）" } else { "" }
+    if ($n -eq 0) { return "序栞$suffix" }
+    $digits = @("", "一", "二", "三", "四", "五", "六", "七", "八", "九")
+    $tens = [int][Math]::Floor($n / 10)
+    $ones = $n % 10
+    $cn = if ($tens -eq 0) { $digits[$ones] } elseif ($tens -eq 1) { "十" + $digits[$ones] } else { $digits[$tens] + "十" + $digits[$ones] }
+    return "第${cn}栞$suffix"
+}
+
 # 根据视频路径自动推断 ReleaseId / Title / Description 的辅助函数
 function Get-VideoDefaults([string]$TargetVideoPath) {
     $item = Get-Item -LiteralPath $TargetVideoPath
@@ -190,9 +200,8 @@ function Get-VideoDefaults([string]$TargetVideoPath) {
         $defId = $Matches[1].ToLower()
     } elseif ($item.Name -match '(ep\d{2})') {
         $defId = $Matches[1].ToLower()
-    } else {
-        $defId = "ep01"
     }
+    # 推断不出时留空：交互模式要求用 [2] 手动填写，-Yes 模式直接报错。
 
     # 2) Title
     $defTitle = ""
@@ -206,8 +215,10 @@ function Get-VideoDefaults([string]$TargetVideoPath) {
     if (-not $defTitle) {
         if ($item.BaseName -match 'ep00') {
             $defTitle = "序栞 · 星栞书库"
-        } else {
+        } elseif ($defId) {
             $defTitle = $defId
+        } else {
+            $defTitle = $item.BaseName
         }
     }
     if ($defTitle.Length -gt 30) {
@@ -217,9 +228,7 @@ function Get-VideoDefaults([string]$TargetVideoPath) {
     # 3) Description
     $defDesc = ""
     $briefPath = Join-Path $projDir "brief.md"
-    if ($defId -eq "ep01") {
-        $defDesc = "一次失败的实验：让 Gemma 4 12B 原生开口说话。四条路线逐一检验——逆映射、线性探针、编解码器上限、学习型解码器——讲清楚怎样证明模型真的学到了东西：留出集、负对照、预注册阈值。损失在降，不等于输出可用。"
-    } elseif (Test-Path -LiteralPath $briefPath) {
+    if (Test-Path -LiteralPath $briefPath) {
         $briefLines = Get-Content -LiteralPath $briefPath -Encoding UTF8
         $idx = [Array]::FindIndex($briefLines, [Predicate[string]]{ param($s) $s -match '^## One-sentence idea' })
         if ($idx -ge 0 -and ($idx + 1) -lt $briefLines.Count) {
@@ -348,9 +357,8 @@ if ($Video) {
     }
     $Video = Resolve-AllowedVideo $Video
 } elseif ($Yes) {
-    $cands = Get-CandidateVideos
-    if ($cands.Count -eq 0) { throw "未找到任何候选 .mp4 文件，请通过 -Video 指定。" }
-    $Video = $cands[0].FullName
+    # 最新导出的不一定是要发的那一期，跳过菜单时必须明确指定视频。
+    throw "使用 -Yes 跳过确认菜单时，必须同时用 -Video 指定要上传的视频。"
 } else {
     $Video = Prompt-SelectVideo -CurrentPath ""
 }
@@ -360,6 +368,9 @@ $defaults = Get-VideoDefaults -TargetVideoPath $Video
 if (-not $ReleaseId)   { $ReleaseId   = $defaults.ReleaseId }
 if (-not $Title)       { $Title       = $defaults.Title }
 if (-not $Description) { $Description = $defaults.Description }
+if ($Yes -and -not $ReleaseId) {
+    throw "无法从视频路径推断作品编号，请用 -ReleaseId 指定（如 ep05）。"
+}
 
 # 交互式配置确认与修改循环
 if (-not $Yes) {
@@ -388,6 +399,10 @@ if (-not $Yes) {
 
         $choice = (Read-Prompt "请输入操作选项 (直接回车开始上传)").Trim()
         if ($choice -eq "" -or $choice.ToLower() -in @("y", "yes")) {
+            if (-not $ReleaseId) {
+                Write-Host "  [!] 作品编号为空，请先用 [2] 填写（如 ep05）。" -ForegroundColor Red
+                continue
+            }
             break
         }
         elseif ($choice.ToLower() -in @("q", "quit", "n", "no", "exit")) {
@@ -567,7 +582,7 @@ try {
     Write-Host "  远端路径 : /var/lib/lyrabot-douyin/releases/$ReleaseId/{manifest.json, video.mp4}"
     Write-Host "  视频大小 : $($manifest.video_bytes) bytes ($SizeMiB MiB)"
     Write-Host "  SHA-256  : $($manifest.video_sha256)"
-    Write-Host "  下一步   : 在 QQ 私聊对主对话角色说「准备发布第 1 栞」（或对应期号）" -ForegroundColor Cyan
+    Write-Host "  下一步   : 在 QQ 私聊对主对话角色说「准备发布$(Get-EpisodeLabel $ReleaseId)」" -ForegroundColor Cyan
     $yuTool = [string]$rawCfg.cleanup_tool
     if ($yuTool -and (Test-Path -LiteralPath $yuTool)) {
         Write-Host "`n[清理] 正在自动清理 OpenFilm 已完结对话的底层调试抓包 (.film/logs) ..." -ForegroundColor DarkCyan

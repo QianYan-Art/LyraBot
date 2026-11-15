@@ -12,3 +12,6 @@ target/
 lyrabot.toml
 data/
 .serena/
+
+# python
+__pycache__/
