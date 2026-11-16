@@ -185,6 +185,7 @@ pub async fn learn(
         effort: Some(effort),
         max_tokens: Some(4000),
         cache_key: None,
+        strip_video: false,
     };
     let c = provider.complete(req, cancel).await?;
     Ok(parse(&c.message.text()))

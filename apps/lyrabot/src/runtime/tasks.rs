@@ -233,6 +233,13 @@ impl Runtime {
                     "缓存保活完成"
                 );
             }
+            Err(e) if quota_exhausted(&e) => {
+                // 套餐额度用尽：失败的保活续不上缓存，额度恢复后的第一次保活只是冷前缀全价预热，
+                // 7d/30d 窗口更是几小时内恢复不了，因此直接结束本轮；用户再说话时计数清零重新开始
+                st.last_llm_at = Some(Instant::now());
+                st.keepalive_count = ka.max_count;
+                tracing::warn!(session, count, error = %e, "缓存保活遇到额度用尽，停止本轮保活");
+            }
             Err(e) => {
                 // 失败也推进计时与计数，避免每 30 秒反复重试消耗额度
                 st.last_llm_at = Some(Instant::now());
@@ -258,11 +265,17 @@ impl Runtime {
             effort: spec.effort,
             max_tokens: Some(1),
             cache_key: Some(format!("lyrabot-s-{}", s.id)),
+            strip_video: spec.strip_video,
         };
         let comp = spec.provider.complete(req, cancel).await?;
         self.kernel.touch_session(s.id);
         Ok(comp.usage)
     }
+}
+
+/// 错误是否为套餐额度用尽（普通限流、网络与 5xx 等不算）。
+fn quota_exhausted(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<lyrabot_llm::LlmError>().is_some_and(|e| e.kind == lyrabot_llm::ErrorKind::QuotaExhausted)
 }
 
 /// 后台结果交给主对话时的消息文本（以〔〕标明是系统信息，见 assets/persona/runtime/agency.md）。
@@ -305,7 +318,17 @@ fn gc_dir(dir: &std::path::Path, max_age: Duration, keep: &HashSet<PathBuf>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::gc_dir;
+    use super::{gc_dir, quota_exhausted};
+    use lyrabot_llm::{ErrorKind, LlmError};
+
+    #[test]
+    fn only_quota_errors_stop_keepalive() {
+        let quota = LlmError::from_status(429, r#"{"error":{"type":"exceeded_current_quota_error"}}"#, None);
+        assert!(quota_exhausted(&anyhow::Error::from(quota)));
+        assert!(!quota_exhausted(&anyhow::Error::from(LlmError::from_status(429, "slow down", None))));
+        assert!(!quota_exhausted(&anyhow::Error::from(LlmError::new(ErrorKind::Transient, "timeout"))));
+        assert!(!quota_exhausted(&anyhow::anyhow!("数据库错误")));
+    }
 
     #[test]
     fn gc_removes_only_old_files() {

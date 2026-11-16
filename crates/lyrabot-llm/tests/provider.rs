@@ -94,6 +94,7 @@ async fn live_tool_call_roundtrip() {
         effort: Some(Effort::Low),
         max_tokens: Some(2000),
         cache_key: None,
+        strip_video: false,
     };
     let c1 = p.complete(req.clone(), CancellationToken::new()).await.unwrap();
     assert!(!c1.message.tool_calls.is_empty(), "模型未调用工具：{:?}", c1.message);

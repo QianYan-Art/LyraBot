@@ -39,7 +39,7 @@
 | 流量日报 | Komari 公开 API，原生 Rust 实现 |
 | 博客同步 | 调用服务器 `/usr/local/bin/blog-sync-kbase.sh`，保留代理失败汇报规则 |
 | 技能体系 | SKILL.md 兼容；保留 grill-me，locator 改写为本项目文档定位 `lyrabot-docs` |
-| 看图/看视频 | 作为主模型原生多模态输入，模型不支持视频时提供 `watch_video` 代看工具 |
+| 看图/看视频 | 图片作为主模型原生多模态输入；视频一律经 `watch_video` 由 `video_model` 代看，与主模型能力无关 |
 | 语音识别 | 使用 QQ 自带 `asr_refer_text`；拿不到时交给能直接听音频的模型或如实说明；不在服务器常驻 whisper |
 | 聊天命令 | 重新设计，见 `docs/07-platform-commands.md` 第 4 节 |
 

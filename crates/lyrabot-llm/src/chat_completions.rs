@@ -44,7 +44,8 @@ impl ChatCompletionsProvider {
     fn encode(&self, req: &ChatRequest) -> Value {
         let mut messages: Vec<Value> = req.system.iter().map(|s| json!({"role": "system", "content": s})).collect();
         // 按目标模型的模态能力编码媒体；未登记的模型按全支持处理，由接口自行报错
-        let caps = self.cfg.models.get(&req.model).map_or(Caps::ALL, |m| Caps { image: m.vision, video: m.video });
+        let mut caps = self.cfg.models.get(&req.model).map_or(Caps::ALL, |m| Caps { image: m.vision, video: m.video });
+        caps.video &= !req.strip_video;
         messages.extend(req.messages.iter().map(|m| encode_message(m, caps)));
         let mut body = json!({
             "model": req.model,
@@ -248,9 +249,9 @@ fn encode_content(parts: &[ContentPart], caps: Caps) -> Value {
                 },
                 None => json!({"type": "image_url", "image_url": {"url": url}}),
             },
-            // 当前模型不支持视频：不发送画面，提示用 watch_video 工具（由支持视频的模型代看）
+            // 不内联视频（模型不支持，或请求要求代看）：不发送画面，提示用 watch_video 工具（由支持视频的模型代看）
             ContentPart::Video { url } if !caps.video => {
-                note(format!("〔这段视频没有直接发给你（当前模型不支持视频）；需要了解内容时用 watch_video 查看：{}〕", url.trim_start_matches("file://")))
+                note(format!("〔这段视频没有直接发给你；需要了解内容时用 watch_video 查看：{}〕", url.trim_start_matches("file://")))
             }
             ContentPart::Video { url } => match url.strip_prefix("file://") {
                 Some(path) => match local_data_uri(path, VIDEO_INLINE_MAX) {
@@ -473,5 +474,28 @@ mod tests {
         // 远程地址原样发送
         let remote = Message::with_parts(Role::User, vec![ContentPart::text("x"), ContentPart::Video { url: "https://v/1.mp4".into() }]);
         assert_eq!(encode_message(&remote, Caps::ALL)["content"][1]["video_url"]["url"], "https://v/1.mp4");
+    }
+
+    #[test]
+    fn strip_video_overrides_model_capability() {
+        let cfg = ProviderConfig {
+            id: "t".into(),
+            base_url: "http://127.0.0.1:9".into(),
+            api_key: lyrabot_core::Secret::new("k"),
+            transport: lyrabot_config::Transport::ChatCompletions,
+            user_agent: None,
+            effort_map: Default::default(),
+            models: Default::default(),
+            timeouts: lyrabot_config::Timeouts { connect_s: 1, first_byte_s: 1, idle_s: 1 },
+        };
+        let p = ChatCompletionsProvider::new(cfg).unwrap();
+        let video = Message::with_parts(Role::User, vec![ContentPart::text("x"), ContentPart::Video { url: "https://v/1.mp4".into() }]);
+        let mut req = ChatRequest { model: "m".into(), messages: vec![video], ..Default::default() };
+        // 未登记的模型按全支持处理：视频原样发送
+        assert_eq!(p.encode(&req)["messages"][0]["content"][1]["video_url"]["url"], "https://v/1.mp4");
+        // 主对话要求代看：即使模型支持视频也不内联，改为提示 watch_video
+        req.strip_video = true;
+        let note = p.encode(&req)["messages"][0]["content"][1]["text"].as_str().unwrap().to_owned();
+        assert!(note.contains("watch_video") && note.contains("https://v/1.mp4"), "{note}");
     }
 }

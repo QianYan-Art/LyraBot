@@ -30,6 +30,8 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     /// 可选：会话级前缀缓存亲和键（编码为 `prompt_cache_key`）。
     pub cache_key: Option<String>,
+    /// 为 true 时视频一律不内联（无论模型是否支持），改为提示用 watch_video 代看；主对话角色在 watch_video 可用时开启。
+    pub strip_video: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

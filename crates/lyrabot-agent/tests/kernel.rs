@@ -115,6 +115,7 @@ async fn setup(provider: Arc<Fake>, tools: Vec<Arc<dyn Tool>>, window: u64) -> (
         tools: reg.all(),
         tail: None,
         compaction: CompactPolicy { keep_tokens: 30, ..Default::default() },
+        strip_video: false,
     };
     (kernel, spec, sid)
 }

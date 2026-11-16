@@ -223,6 +223,7 @@ pub async fn consolidate(
         effort: Some(effort),
         max_tokens: Some(4000),
         cache_key: None,
+        strip_video: false,
     };
     let reply = provider.complete(req, cancel).await?.message.text();
     let Some(ops) = parse_ops(&reply) else {

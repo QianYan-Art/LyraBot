@@ -616,8 +616,10 @@ impl Runtime {
         let kit = self.kit();
         let s2 = self.snapshot(s.id).await?;
         let mut wanted: Vec<&str> = c.persona.tools.iter().map(String::as_str).filter(|n| self.tools.get(n).is_some()).collect();
-        // watch_video：当前模型看不了视频时代看；模型支持视频但视频超过内联上限时也靠它回退
-        if self.tools.get("watch_video").is_some() && !wanted.contains(&"watch_video") {
+        // watch_video 可用时主对话一律不直接收视频，交给 video_model 代看（与主模型是否支持视频无关）；
+        // 不可用时才按主模型能力内联，避免提示一个不存在的工具
+        let delegate_video = self.tools.get("watch_video").is_some();
+        if delegate_video && !wanted.contains(&"watch_video") {
             wanted.push("watch_video");
         }
         let mut tools = self.tools.select(&wanted).map_err(anyhow::Error::msg)?;
@@ -642,6 +644,7 @@ impl Runtime {
                     std::sync::Arc::new(move |ms: i64| kit.persona.time_label(ms))
                 }),
             },
+            strip_video: delegate_video,
         })
     }
 

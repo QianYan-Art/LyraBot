@@ -162,5 +162,6 @@ pub(crate) fn build_turn_spec(
             style: lyrabot_agent::CompactStyle::Task,
             time_label: None,
         },
+        strip_video: false,
     })
 }

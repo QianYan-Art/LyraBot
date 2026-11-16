@@ -39,6 +39,7 @@ async fn chat(host: &Host, system: &str, user: String, cancel: &CancellationToke
         effort: None,
         max_tokens: None,
         cache_key: None,
+        strip_video: false,
     };
     let total = Duration::from_secs(p.int("timeout_s", 120) as u64);
     let out = tokio::time::timeout(total, provider.complete(req, cancel.clone()))

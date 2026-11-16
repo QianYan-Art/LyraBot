@@ -92,6 +92,8 @@ pub struct TurnSpec {
     /// 本轮附加在最后一条 user 输入末尾的动态内容，随该消息落库（见 [`Message::tail`]）。
     pub tail: Option<String>,
     pub compaction: CompactPolicy,
+    /// 视频不内联、一律交给 watch_video 代看（见 [`ChatRequest::strip_video`]）
+    pub strip_video: bool,
 }
 
 /// 会话级消息队列（与 pi 语义一致）。
@@ -296,6 +298,7 @@ impl Kernel {
                 effort: spec.effort,
                 max_tokens: Some(spec.max_output_tokens),
                 cache_key: Some(format!("lyrabot-s-{session}")),
+                strip_video: spec.strip_video,
             };
             let idle_s = self.session_idle(session).map(|d| d.as_secs());
             let completion = match self.stream_once(spec, session, req, &cancel).await {
@@ -524,6 +527,7 @@ impl Kernel {
             effort: Some(Effort::Low),
             max_tokens: Some(6000),
             cache_key: None,
+            strip_video: false,
         };
         let c = spec.provider.complete(req, cancel.clone()).await?;
         let summary = context::render_compaction(&c.message.text());
