@@ -1,8 +1,8 @@
 //! watch_video：让支持视频的模型代看一段本地视频并回答问题。
 //!
-//! 主对话角色的模型（如 k3-256k）不支持视频输入时，入站视频不直接发给主对话角色，改由其按需调用本工具：
+//! 主对话角色不直接接收视频（本工具可用时一律如此，与主模型是否支持视频无关），改由其按需调用本工具：
 //! 用 `[tools] video_model`（默认 kimi-for-coding）看视频，把文字结果交回，主对话角色再用自己的口吻回复。
-//! 视频必须位于媒体目录内；超过内联上限或时长超过 10 分钟时先用 ffmpeg 压到 480p、每秒 2 帧（结果缓存在媒体目录，随媒体清理回收）。
+//! 视频必须位于媒体目录或 QQ 收件目录内；超过内联上限或时长超过 10 分钟时先用 ffmpeg 压到 480p、每秒 2 帧（结果缓存在媒体目录，随媒体清理回收）。
 
 use crate::Host;
 use async_trait::async_trait;
@@ -44,11 +44,15 @@ impl WatchVideo {
     async fn run(&self, args: &Value, cancel: &CancellationToken) -> Result<String, String> {
         let c = self.host.cfg.get();
         let raw = args.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).ok_or("缺少 path")?;
-        let path = within(Path::new(raw.trim_start_matches("file://")), &c.tools.media_dir)?;
+        let mut roots = vec![c.tools.media_dir.as_path()];
+        if let Some(q) = &c.qq {
+            roots.push(q.inbox_dir.as_path());
+        }
+        let path = within(Path::new(raw.trim_start_matches("file://")), &roots)?;
         let question = args.get("question").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).unwrap_or("概括这段视频的内容。");
         let pcfg = c.provider(&c.persona.provider).ok_or("主对话模型提供方未配置")?;
         let model = c.tools.video_model.clone();
-        if !pcfg.models.get(&model).is_some_and(|m| m.video) {
+        if !crate::video_model_ready(&c) {
             return Err(format!("看视频的模型 {model} 不在模型目录中或不支持视频"));
         }
         // 超长视频只看前 MAX_SECONDS 秒（与文件大小无关），结果里如实说明；读不出时长时同样走截取，保证成本上界。
@@ -102,12 +106,12 @@ fn path_str(p: &Path) -> Result<&str, String> {
     p.to_str().ok_or_else(|| "路径不是合法 UTF-8".to_owned())
 }
 
-/// 只允许读取媒体目录内的文件（防止借工具读取任意文件）。
-fn within(path: &Path, root: &Path) -> Result<PathBuf, String> {
+/// 只允许读取给定目录（媒体目录、QQ 收件目录）内的普通文件，防止借工具读取任意文件。
+fn within(path: &Path, roots: &[&Path]) -> Result<PathBuf, String> {
     let p = path.canonicalize().map_err(|_| "找不到这个视频文件".to_owned())?;
-    let r = root.canonicalize().map_err(|_| "媒体目录不存在".to_owned())?;
-    if !p.starts_with(&r) || !p.is_file() {
-        return Err("只能查看保存在媒体目录里的视频".into());
+    let inside = roots.iter().filter_map(|r| r.canonicalize().ok()).any(|r| p.starts_with(r));
+    if !inside || !p.is_file() {
+        return Err("只能查看保存在媒体目录或收件目录里的视频".into());
     }
     Ok(p)
 }
@@ -219,10 +223,15 @@ mod tests {
         std::fs::write(root.join("inbox/a.mp4"), b"x").unwrap();
         let outside = std::env::temp_dir().join(format!("lyrabot-video-outside-{}.mp4", std::process::id()));
         std::fs::write(&outside, b"x").unwrap();
-        assert!(within(&root.join("inbox/a.mp4"), &root).is_ok());
-        assert!(within(&root.join("inbox/../inbox/a.mp4"), &root).is_ok());
-        assert!(within(&outside, &root).is_err(), "媒体目录外的文件不能看");
-        assert!(within(&root.join("inbox"), &root).is_err(), "目录不是视频");
+        let media = root.join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        let inbox = root.join("inbox");
+        let roots = [media.as_path(), inbox.as_path()];
+        assert!(within(&root.join("inbox/a.mp4"), &roots).is_ok(), "独立配置的收件目录也可以看");
+        assert!(within(&root.join("inbox/../inbox/a.mp4"), &roots).is_ok());
+        assert!(within(&root.join("inbox/a.mp4"), &[media.as_path()]).is_err(), "不在允许目录内的文件不能看");
+        assert!(within(&outside, &roots).is_err(), "媒体目录外的文件不能看");
+        assert!(within(&root.join("inbox"), &roots).is_err(), "目录不是视频");
         std::fs::remove_dir_all(&root).unwrap();
         std::fs::remove_file(&outside).unwrap();
     }

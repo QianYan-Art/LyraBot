@@ -2,7 +2,7 @@
 use base64::Engine;
 use lyrabot_agent::{Tool, ToolCtx};
 use lyrabot_config::ConfigHandle;
-use lyrabot_plugins::{GrokSearch, Host, ImageGenerate, Speak, WebSearch};
+use lyrabot_plugins::{GrokFetch, GrokSearch, Host, ImageGenerate, Speak, WebSearch};
 use serde_json::json;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -138,6 +138,27 @@ async fn grok_search_streams_and_assembles_results() {
     let out = GrokSearch::new(h).call(ctx(), json!({"query": "Rust 1.90 发布日期"})).await;
     assert!(!out.is_error, "{}", out.text);
     assert_eq!(out.text, "1. Rust 1.90\nhttps://blog.rust-lang.org/a\n2025-09-18 发布");
+}
+
+/// 输出达到长度上限（finish_reason = "length"）时如实注明可能不完整。
+#[tokio::test]
+async fn grok_fetch_marks_truncated_output() {
+    let s = MockServer::start().await;
+    let body = [
+        format!("data: {}\n\n", json!({"choices": [{"index": 0, "delta": {"content": "# 标题\n正文前半"}, "finish_reason": null}]})),
+        format!("data: {}\n\n", json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]})),
+        "data: [DONE]\n\n".to_owned(),
+    ]
+    .concat();
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(body))
+        .mount(&s)
+        .await;
+    let (h, _dir) = host(&s.uri());
+    let out = GrokFetch::new(h).call(ctx(), json!({"url": "https://example.com/a"})).await;
+    assert!(!out.is_error, "{}", out.text);
+    assert!(out.text.starts_with("# 标题\n正文前半") && out.text.contains("可能不完整"), "{}", out.text);
 }
 
 #[tokio::test]

@@ -249,10 +249,12 @@ fn encode_content(parts: &[ContentPart], caps: Caps) -> Value {
                 },
                 None => json!({"type": "image_url", "image_url": {"url": url}}),
             },
-            // 不内联视频（模型不支持，或请求要求代看）：不发送画面，提示用 watch_video 工具（由支持视频的模型代看）
-            ContentPart::Video { url } if !caps.video => {
-                note(format!("〔这段视频没有直接发给你；需要了解内容时用 watch_video 查看：{}〕", url.trim_start_matches("file://")))
-            }
+            // 不内联视频（模型不支持，或请求要求代看）：不发送画面；本地文件提示用 watch_video 代看，
+            // 其他来源（远程地址、data URI）代看工具读不了，也不把原文塞进提示
+            ContentPart::Video { url } if !caps.video => match url.strip_prefix("file://") {
+                Some(path) => note(format!("〔这段视频没有直接发给你；需要了解内容时用 watch_video 查看：{path}〕")),
+                None => note("〔这里有一段视频，但不是本地文件，没法直接发给你，也无法代看〕".into()),
+            },
             ContentPart::Video { url } => match url.strip_prefix("file://") {
                 Some(path) => match local_data_uri(path, VIDEO_INLINE_MAX) {
                     Ok(data) => json!({"type": "video_url", "video_url": {"url": data}}),
@@ -290,7 +292,7 @@ impl Accumulator {
             return Vec::new();
         };
         if let Some(err) = v.get("error") {
-            self.error = Some(LlmError::new(ErrorKind::Unknown, err.to_string()));
+            self.error = Some(LlmError::from_stream_error(&err.to_string()));
             self.done = true;
             return Vec::new();
         }
@@ -425,7 +427,11 @@ mod tests {
     fn inline_error_surfaces() {
         let mut a = Accumulator::default();
         a.feed_line(r#"data: {"error":{"message":"quota"}}"#);
-        assert!(a.finish().is_err());
+        assert_eq!(a.finish().unwrap_err().kind, ErrorKind::Unknown);
+        // 流中途报额度用尽时同样识别为 QuotaExhausted（保活据此停止本轮）
+        let mut a = Accumulator::default();
+        a.feed_line(r#"data: {"error":{"type":"exceeded_current_quota_error","message":"You've reached your 5-hour usage limit."}}"#);
+        assert_eq!(a.finish().unwrap_err().kind, ErrorKind::QuotaExhausted);
     }
 
     #[test]
@@ -493,9 +499,13 @@ mod tests {
         let mut req = ChatRequest { model: "m".into(), messages: vec![video], ..Default::default() };
         // 未登记的模型按全支持处理：视频原样发送
         assert_eq!(p.encode(&req)["messages"][0]["content"][1]["video_url"]["url"], "https://v/1.mp4");
-        // 主对话要求代看：即使模型支持视频也不内联，改为提示 watch_video
+        // 请求要求代看：即使模型支持视频也不内联；远程地址代看工具读不了，提示里不给 watch_video 也不带原文
         req.strip_video = true;
         let note = p.encode(&req)["messages"][0]["content"][1]["text"].as_str().unwrap().to_owned();
-        assert!(note.contains("watch_video") && note.contains("https://v/1.mp4"), "{note}");
+        assert!(!note.contains("watch_video") && !note.contains("https://v/1.mp4"), "{note}");
+        // 本地文件：提示用 watch_video 并给出路径
+        req.messages = vec![Message::with_parts(Role::User, vec![ContentPart::text("x"), ContentPart::Video { url: "file:///m/inbox/a.mp4".into() }])];
+        let note = p.encode(&req)["messages"][0]["content"][1]["text"].as_str().unwrap().to_owned();
+        assert!(note.contains("watch_video") && note.contains("/m/inbox/a.mp4"), "{note}");
     }
 }

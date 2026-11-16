@@ -617,8 +617,8 @@ impl Runtime {
         let s2 = self.snapshot(s.id).await?;
         let mut wanted: Vec<&str> = c.persona.tools.iter().map(String::as_str).filter(|n| self.tools.get(n).is_some()).collect();
         // watch_video 可用时主对话一律不直接收视频，交给 video_model 代看（与主模型是否支持视频无关）；
-        // 不可用时才按主模型能力内联，避免提示一个不存在的工具
-        let delegate_video = self.tools.get("watch_video").is_some();
+        // 不可用（未注册，或重载后 video_model 失效）时才按主模型能力内联，避免指向一个用不了的工具
+        let delegate_video = self.tools.get("watch_video").is_some() && lyrabot_plugins::video_model_ready(c);
         if delegate_video && !wanted.contains(&"watch_video") {
             wanted.push("watch_video");
         }

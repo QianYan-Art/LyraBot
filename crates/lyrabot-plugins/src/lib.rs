@@ -24,6 +24,12 @@ use lyrabot_core::Secret;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// 代看视频的模型是否可用：须在主对话角色提供方的模型目录中且支持视频。
+/// 注册 watch_video 与每次调用都按当前配置判断，重载后改了 video_model 也不会失真。
+pub fn video_model_ready(c: &Config) -> bool {
+    c.provider(&c.persona.provider).and_then(|p| p.models.get(&c.tools.video_model)).is_some_and(|m| m.video)
+}
+
 /// 插件共用的运行环境。
 #[derive(Clone)]
 pub struct Host {
@@ -109,8 +115,7 @@ pub fn register(reg: &mut ToolRegistry, host: &Host) -> Vec<String> {
         add(Arc::new(GrokSearch::new(host.clone())));
         add(Arc::new(GrokFetch::new(host.clone())));
     }
-    // 看视频的模型须在主对话角色提供方的模型目录中且支持视频
-    if c.provider(&c.persona.provider).and_then(|p| p.models.get(&c.tools.video_model)).is_some_and(|m| m.video) {
+    if video_model_ready(&c) {
         add(Arc::new(WatchVideo::new(host.clone())));
     } else {
         tracing::warn!(model = %c.tools.video_model, "看视频的模型不可用，不注册 watch_video");

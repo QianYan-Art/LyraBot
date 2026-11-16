@@ -32,9 +32,7 @@ impl LlmError {
         let lower = body.to_ascii_lowercase();
         let kind = match status {
             401 | 403 => ErrorKind::Auth,
-            429 if lower.contains("exceeded_current_quota") || lower.contains("usage limit") || lower.contains("insufficient_quota") => {
-                ErrorKind::QuotaExhausted
-            }
+            429 if quota_text(&lower) => ErrorKind::QuotaExhausted,
             429 => ErrorKind::RateLimited,
             400 | 413
                 if lower.contains("context") && (lower.contains("length") || lower.contains("exceed"))
@@ -51,9 +49,20 @@ impl LlmError {
         Self { kind, status: Some(status), message: snippet, retry_after }
     }
 
+    /// 流式响应中途返回的 `error` 事件：没有状态码，额度用尽仍按正文识别，其余记为未知。
+    pub fn from_stream_error(body: &str) -> Self {
+        let kind = if quota_text(&body.to_ascii_lowercase()) { ErrorKind::QuotaExhausted } else { ErrorKind::Unknown };
+        Self::new(kind, body.chars().take(500).collect::<String>())
+    }
+
     pub fn retryable(&self) -> bool {
         matches!(self.kind, ErrorKind::Transient | ErrorKind::RateLimited)
     }
+}
+
+/// 套餐额度用尽的正文特征（参数为已转小写的正文）。
+fn quota_text(lower: &str) -> bool {
+    lower.contains("exceeded_current_quota") || lower.contains("usage limit") || lower.contains("insufficient_quota")
 }
 
 impl fmt::Display for LlmError {

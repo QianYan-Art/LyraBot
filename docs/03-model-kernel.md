@@ -18,7 +18,7 @@
 - 缓存与连接复用：命中数在 `usage.prompt_tokens_details.cached_tokens`。`lyrabot_llm::build` 按 `ProviderConfig` 缓存复用 `Provider` 实例及其底层 HTTP/TLS 连接池（`/reload` 配置变更后自动重建）；内核按会话携带稳定的 `prompt_cache_key`（`lyrabot-s-<session>`），每次模型请求完成时记录 `prompt_tokens`、`cached_tokens`、命中率与距该会话上次请求的间隔 `idle_s`。不把五小时额度窗口当缓存时间。
 - 自检：`lyrabot --check` 只核对配置里的模型 ID 是否出现在 `/models` 列表中；`/models` 返回的 `context_length`、模态与 effort 可选值是人工核对后写进配置的，自检不逐项比对。
 - 模态：`k3-256k` 输入只有文字与图片（`supports_video_in=false`）；`kimi-for-coding`、`kimi-for-coding-highspeed`、`k3`、`k3.1-pro` 系列支持视频。视频以 `{"type":"video_url","video_url":{"url":"data:video/mp4;base64,…"}}` 发送，服务器实测通过（2 秒测试视频 566 输入 token）。
-- 媒体编码按目标模型在模型目录中的 `vision` / `video` 能力处理：本地 `file://` 图片（≤10 MB）与视频（≤20 MB）在请求时才转为 data URI；模型不支持视频、视频超限、或请求设了 `strip_video` 时不发画面，改为一句提示“需要了解内容时用 watch_video 查看 <路径>”（见 `06-tools-plugins.md` 第 2 节）。主对话角色在 watch_video 可用时固定 `strip_video = true`，主模型换成支持视频的模型也不会直接收视频；后台执行者按模型能力处理。
+- 媒体编码按目标模型在模型目录中的 `vision` / `video` 能力处理：本地 `file://` 图片（≤10 MB）与视频（≤20 MB）在请求时才转为 data URI；模型不支持视频、视频超限、或请求设了 `strip_video` 时不发画面，改为一句提示“需要了解内容时用 watch_video 查看 <路径>”（见 `06-tools-plugins.md` 第 2 节；非本地来源如远程地址、data URI 代看工具读不了，只提示无法查看，不把原文写进提示）。流式响应中途的 `error` 事件同样按正文识别额度用尽（`QuotaExhausted`）。主对话角色在 watch_video 已注册且当前配置的 `video_model` 可用时固定 `strip_video = true`，主模型换成支持视频的模型也不会直接收视频；后台执行者按模型能力处理。
 
 ### 1.3 可靠性
 

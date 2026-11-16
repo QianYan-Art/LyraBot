@@ -165,7 +165,8 @@ sys.path.insert(0, sys.argv[1])
 from sync_openfilm import load_config
 c = load_config(sys.argv[2])
 print(json.dumps(dict(host=c.host, user=c.user, port=c.port,
-    identity_file=str(c.identity_file), projects_root=str(c.projects_root), server_source=c.server_source)))
+    identity_file=str(c.identity_file), projects_root=str(c.projects_root), server_source=c.server_source,
+    destination=c.destination)))
 '@
 $configOut = & $Python -B -X utf8 -c $configCode $OpsDir $ConfigPath
 if ($LASTEXITCODE -ne 0) { throw '发布配置校验失败；未连接服务器。' }
@@ -174,7 +175,19 @@ $ProjectsRoot = (Resolve-Path -LiteralPath $cfg.projects_root).Path
 $IdentityFile = (Resolve-Path -LiteralPath $cfg.identity_file).Path
 $ServerSource = if ($cfg.server_source) { $cfg.server_source } else { "/opt/lyrabot-douyin" }
 $Destination  = "$($cfg.user)@$($cfg.host)"
+# scp 的 host:path 写法需要给 IPv6 地址加方括号，沿用配置模块给出的格式
+$ScpDestination = $cfg.destination
 $SshPort      = [int]$cfg.port
+
+# Windows PowerShell 5.1 至 7.2 调用原生程序时不转义参数里的双引号（a"b 会变成 ab，落单的引号还会吞掉后续参数），
+# 这里按 Windows 命令行规则补上转义；7.3 起由 PowerShell 自己处理，原样传递。
+function ConvertTo-NativeArg([string]$Value) {
+    if ($PSVersionTable.PSVersion -ge [version]'7.3') { return $Value }
+    $escaped = $Value -replace '(\\*)"', '$1$1\"'
+    # 含空白时 PowerShell 会在两侧加引号，结尾的反斜杠需要加倍，避免转义掉补上的右引号
+    if ($escaped -match '\s') { $escaped = $escaped -replace '(\\+)$', '$1$1' }
+    return $escaped
+}
 
 # 把作品编号换算成 QQ 里说的期号：ep00 -> 序栞，ep04 -> 第四栞，ep12-r2 -> 第十二栞（编号 ep12-r2）；换算不了就直接用编号。
 function Get-EpisodeLabel([string]$Id) {
@@ -196,9 +209,10 @@ function Get-VideoDefaults([string]$TargetVideoPath) {
 
     # 1) ReleaseId
     $defId = ""
-    if ($projDir -match 'yu-(ep\d{2})') {
+    # 修订版后缀（如 ep12-r2）一并保留，避免把修订版当成基础编号入库
+    if ($projDir -match 'yu-(ep\d{2}(?:-r\d+)?)') {
         $defId = $Matches[1].ToLower()
-    } elseif ($item.Name -match '(ep\d{2})') {
+    } elseif ($item.Name -match '(ep\d{2}(?:-r\d+)?)') {
         $defId = $Matches[1].ToLower()
     }
     # 推断不出时留空：交互模式要求用 [2] 手动填写，-Yes 模式直接报错。
@@ -486,9 +500,9 @@ try {
     $prepOut = & $Python -X utf8 $StageScript prepare `
         --video $VideoPath `
         --release-id $ReleaseId `
-        --title $Title `
-        --description $Description `
-        --source $Source `
+        --title (ConvertTo-NativeArg $Title) `
+        --description (ConvertTo-NativeArg $Description) `
+        --source (ConvertTo-NativeArg $Source) `
         --output $ManifestPath
     if ($LASTEXITCODE -ne 0) {
         throw "本机 stage_release.py prepare 校验失败。"
@@ -525,7 +539,7 @@ try {
         throw "服务器返回的临时目录路径异常: $RemoteTempDir"
     }
 
-    & scp @ScpCommon $ManifestPath "${Destination}:${RemoteTempDir}/manifest.json"
+    & scp @ScpCommon $ManifestPath "${ScpDestination}:${RemoteTempDir}/manifest.json"
     if ($LASTEXITCODE -ne 0) {
         throw "上传 manifest.json 失败。"
     }
@@ -552,7 +566,7 @@ try {
 
     Write-Host "`n[3/4] 正在上传视频到 ${Destination}:${RemoteTempDir}/video.mp4 ..." -ForegroundColor Green
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    & scp @ScpCommon $VideoPath "${Destination}:${RemoteTempDir}/video.mp4"
+    & scp @ScpCommon $VideoPath "${ScpDestination}:${RemoteTempDir}/video.mp4"
     $sw.Stop()
     if ($LASTEXITCODE -ne 0) {
         throw "视频 SCP 上传失败（退出码 $LASTEXITCODE）。"

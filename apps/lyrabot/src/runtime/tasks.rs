@@ -321,6 +321,132 @@ mod tests {
     use super::{gc_dir, quota_exhausted};
     use lyrabot_llm::{ErrorKind, LlmError};
 
+    /// 极简本地模型服务：每个连接都按当前 `status` 回一个固定 JSON 错误，记录收到的请求体。
+    fn fake_llm(status: std::sync::Arc<std::sync::atomic::AtomicU16>, bodies: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream);
+                let mut len = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0; len];
+                let _ = reader.read_exact(&mut body);
+                bodies.lock().unwrap().push(String::from_utf8_lossy(&body).into_owned());
+                let code = status.load(std::sync::atomic::Ordering::SeqCst);
+                let payload = if code == 429 {
+                    r#"{"error":{"type":"exceeded_current_quota_error","message":"You've reached your 5-hour usage limit."}}"#
+                } else {
+                    r#"{"error":{"message":"bad request"}}"#
+                };
+                let resp = format!(
+                    "HTTP/1.1 {code} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                let _ = reader.get_mut().write_all(resp.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn keepalive_stops_on_quota_and_persona_delegates_video() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        let status = std::sync::Arc::new(AtomicU16::new(429));
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = fake_llm(status.clone(), bodies.clone());
+        let dir = std::env::temp_dir().join(format!("lyrabot-rt-ka-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("k.key");
+        std::fs::write(&key, "test-key").unwrap();
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/persona");
+        let slash = |p: &std::path::Path| p.display().to_string().replace('\\', "/");
+        let toml = format!(
+            r#"
+[paths]
+data_dir = '{}'
+[llm]
+default_provider = "p"
+[llm.providers.p]
+base_url = "{base}"
+key_file = '{}'
+transport = "chat_completions"
+[llm.providers.p.models.m]
+context_length = 8192
+video = true
+[llm.providers.p.models.v]
+context_length = 8192
+video = true
+[llm.providers.p.models."kimi-for-coding"]
+context_length = 8192
+[persona]
+provider = "p"
+model = "m"
+effort = "low"
+assets_dir = '{}'
+[persona.keepalive]
+interval_minutes = 1
+max_count = 9
+[tools]
+video_model = "v"
+[orchestra]
+provider = "p"
+default_model = "m"
+default_effort = "low"
+worker_prompt = '{}'
+"#,
+            slash(&dir),
+            slash(&key),
+            slash(&assets),
+            slash(&assets.join("../agents/worker.md")),
+        );
+        let cfg_path = dir.join("lyrabot.toml");
+        std::fs::write(&cfg_path, toml).unwrap();
+        let rt = std::sync::Arc::new(crate::runtime::Runtime::open(lyrabot_config::ConfigHandle::open(&cfg_path).unwrap()).await.unwrap());
+        let due = || std::time::Instant::now().checked_sub(std::time::Duration::from_secs(120));
+
+        // 主对话：代看可用时即使主模型支持视频也不内联；video_model 失效（如重载后）时退回按主模型能力处理
+        let c = rt.cfg.get();
+        let s = rt.store.session(rt.session()).await.unwrap();
+        assert!(rt.persona_spec(&c, &s, "").await.unwrap().strip_video);
+        let mut stale = (*c).clone();
+        stale.tools.video_model = "missing".into();
+        assert!(!rt.persona_spec(&stale, &s, "").await.unwrap().strip_video);
+
+        // 额度用尽：本轮直接结束（计数拉满），之后不再发保活请求
+        rt.state().last_llm_at = due();
+        rt.keepalive_if_due().await;
+        assert_eq!(rt.state().keepalive_count, 9);
+        let sent = bodies.lock().unwrap().len();
+        assert_eq!(sent, 1, "额度错误不应重试");
+        rt.state().last_llm_at = due();
+        rt.keepalive_if_due().await;
+        assert_eq!(bodies.lock().unwrap().len(), sent, "本轮已结束，不再发保活");
+
+        // 用户再说话后计数清零；普通失败只计一次，等下一个间隔
+        status.store(400, Ordering::SeqCst);
+        {
+            let mut st = rt.state();
+            st.keepalive_count = 0;
+            st.last_llm_at = due();
+        }
+        rt.keepalive_if_due().await;
+        assert_eq!(rt.state().keepalive_count, 1);
+        // 保活请求与正式请求同样剥离视频
+        assert!(bodies.lock().unwrap().iter().all(|b| !b.contains("video_url")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn only_quota_errors_stop_keepalive() {
         let quota = LlmError::from_status(429, r#"{"error":{"type":"exceeded_current_quota_error"}}"#, None);

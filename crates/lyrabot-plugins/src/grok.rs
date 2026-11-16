@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use lyrabot_agent::{Concurrency, Tool, ToolCtx, ToolOutput};
 use lyrabot_config::{ProviderConfig, Timeouts, Transport};
 use lyrabot_core::{Message, ToolSpec};
-use lyrabot_llm::ChatRequest;
+use lyrabot_llm::{ChatRequest, FinishReason};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -18,8 +18,10 @@ const FETCH_PROMPT: &str = "# 角色: 网页内容获取器\n\n获取网页内�
 /// 用内核的流式 Chat Completions 客户端请求 grok（连接复用、SSE 解析、可重试错误退避重试）。
 /// 必须流式：grok 联网检索常需 12–20 秒，前置 CDN 只等 15 秒响应头，非流式请求会被截断为 524；
 /// 流式的响应头立即返回，不受该限制。
-async fn chat(host: &Host, system: &str, user: String, cancel: &CancellationToken) -> Result<String, String> {
+async fn chat(host: &Host, system: &str, user: String, cancel: &CancellationToken) -> Result<Reply, String> {
     let (c, p) = host.active("grok", "openai_chat")?;
+    // 只由总时长 timeout_s 约束：首字节与流空闲上限放宽到同一值，避免默认 90 秒空闲先于总超时触发
+    let total_s = p.int("timeout_s", 120) as u64;
     let cfg = ProviderConfig {
         id: format!("plugin-grok:{}", p.name),
         base_url: p.value_or_file(&c, "url")?.trim_end_matches('/').to_owned(),
@@ -28,7 +30,7 @@ async fn chat(host: &Host, system: &str, user: String, cancel: &CancellationToke
         user_agent: None,
         effort_map: Default::default(),
         models: Default::default(),
-        timeouts: Timeouts::default(),
+        timeouts: Timeouts { first_byte_s: total_s, idle_s: total_s, ..Timeouts::default() },
     };
     let provider = lyrabot_llm::build(&cfg).map_err(|e| format!("grok 客户端初始化失败：{e}"))?;
     let req = ChatRequest {
@@ -41,13 +43,34 @@ async fn chat(host: &Host, system: &str, user: String, cancel: &CancellationToke
         cache_key: None,
         strip_video: false,
     };
-    let total = Duration::from_secs(p.int("timeout_s", 120) as u64);
-    let out = tokio::time::timeout(total, provider.complete(req, cancel.clone()))
-        .await
-        .map_err(|_| format!("grok 请求超时（{} 秒）", total.as_secs()))?
-        .map_err(|e| format!("grok 请求失败：{e}"))?;
+    // 总超时时取消子令牌，让后台读流任务随之退出，不留连接
+    let stream_cancel = cancel.child_token();
+    let out = tokio::time::timeout(Duration::from_secs(total_s), provider.complete(req, stream_cancel.clone())).await;
+    let out = match out {
+        Ok(r) => r.map_err(|e| format!("grok 请求失败：{e}"))?,
+        Err(_) => {
+            stream_cancel.cancel();
+            return Err(format!("grok 请求超时（{total_s} 秒）"));
+        }
+    };
     let text = out.message.text();
-    if text.trim().is_empty() { Err("grok 返回中没有内容".into()) } else { Ok(text) }
+    if text.trim().is_empty() {
+        return Err("grok 返回中没有内容".into());
+    }
+    Ok(Reply { text, truncated: out.finish == FinishReason::Length })
+}
+
+/// grok 的回答；`truncated` 表示模型输出达到长度上限被截断。
+struct Reply {
+    text: String,
+    truncated: bool,
+}
+
+impl Reply {
+    /// 截断时在整理好的结果末尾如实注明。
+    fn note(&self, rendered: String) -> String {
+        if self.truncated { format!("{rendered}\n（grok 输出达到长度上限，结果可能不完整）") } else { rendered }
+    }
 }
 
 fn now_beijing() -> String {
@@ -90,7 +113,7 @@ impl Tool for GrokSearch {
         let platform = args.get("platform").and_then(Value::as_str).map(|p| format!("\n\n专注于平台: {p}")).unwrap_or_default();
         let user = format!("{}\n{q}{platform}\n\n以 JSON 数组形式返回 3-10 个结果。", now_beijing());
         match chat(&self.host, SEARCH_PROMPT, user, &ctx.cancel).await {
-            Ok(t) => ToolOutput::ok(render_search(q, &t)),
+            Ok(r) => ToolOutput::ok(r.note(render_search(q, &r.text))),
             Err(e) => ToolOutput::err(e),
         }
     }
@@ -133,7 +156,7 @@ impl Tool for GrokFetch {
             None => format!("{url}\n\n获取并返回结构化 Markdown，去掉导航、广告和页脚。"),
         };
         match chat(&self.host, FETCH_PROMPT, user, &ctx.cancel).await {
-            Ok(t) => ToolOutput::ok(clip(&t, FETCH_LIMIT)),
+            Ok(r) => ToolOutput::ok(r.note(clip(&r.text, FETCH_LIMIT))),
             Err(e) => ToolOutput::err(e),
         }
     }
