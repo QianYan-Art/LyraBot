@@ -108,7 +108,7 @@ pub struct KeepaliveSettings {
     pub max_count: u32,
 }
 fn d_ka_interval() -> u64 {
-    18
+    25
 }
 fn d_ka_max() -> u32 {
     9
