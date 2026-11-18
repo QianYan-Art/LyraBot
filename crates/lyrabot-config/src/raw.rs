@@ -66,10 +66,10 @@ fn d_window() -> u64 {
     60
 }
 fn d_replies() -> u32 {
-    5
+    4
 }
 fn d_quota() -> u32 {
-    4
+    300
 }
 
 #[derive(Deserialize, Default)]

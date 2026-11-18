@@ -139,8 +139,8 @@ app_id = "__QQ_APP_ID__"
 secret_file = "secrets/qq.secret"
 allowed_users = ["__QQ_OWNER__"]
 reply_window_min = 60       # 被动回复有效期（分钟）
-max_replies = 5             # 单条消息最多被动回复次数
-proactive_monthly_quota = 4 # 每月主动消息额度，用尽后延迟到用户下次说话
+max_replies = 4             # 单条消息最多被动回复次数（QQ 平台规则：60 分钟内 4 次）
+proactive_monthly_quota = 300 # 每月主动消息本地上限（平台为每用户每天 1000 条，此处防失控），用尽后延迟到用户下次说话
 inbox_dir = "/var/lib/lyrabot/media/inbox"
 
 # 抖音外部服务（docs/06-tools-plugins.md 第 3 节）。服务端允许的调用方为 lyrabot 用户与 lyrabot.service

@@ -63,7 +63,15 @@ pub struct SendError {
     pub message: String,
 }
 
-pub type SendResult = Result<(), SendError>;
+/// 发送结果：平台暂时没有可用通道时消息会被暂存，等用户下次说话再补发。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    Sent,
+    /// 至少有一部分内容没送出，已暂存待补发
+    Deferred,
+}
+
+pub type SendResult = Result<Delivery, SendError>;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PlatformCaps {

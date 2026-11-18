@@ -1,6 +1,6 @@
 //! 本地命令行平台：逐行读 stdin，流式打印回复。开发与切换前测试用。
 
-use crate::{Inbound, Outbound, Platform, PlatformCaps, PlatformId, SendResult, anyhow_like};
+use crate::{Delivery, Inbound, Outbound, Platform, PlatformCaps, PlatformId, SendResult, anyhow_like};
 use async_trait::async_trait;
 use lyrabot_core::ContentPart;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -63,7 +63,7 @@ impl Platform for CliPlatform {
         }
         s.push_str("> ");
         self.write(&s).await;
-        Ok(())
+        Ok(Delivery::Sent)
     }
 
     async fn stream_delta(&self, text: &str) {

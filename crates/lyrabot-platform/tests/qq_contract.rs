@@ -5,7 +5,7 @@ use futures_util::{SinkExt, StreamExt};
 use lyrabot_config::QqConfig;
 use lyrabot_core::Secret;
 use lyrabot_platform::qq::QqPlatform;
-use lyrabot_platform::{Outbound, Platform};
+use lyrabot_platform::{Delivery, Outbound, Platform};
 use lyrabot_store::Store;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -137,8 +137,8 @@ async fn proactive_quota_then_defer_until_next_inbound() {
     let store = Store::in_memory().unwrap();
     let qq = QqPlatform::new(cfg, store.clone());
     // 没有被动窗口：第一条走主动（无 msg_id），第二条额度用尽被延迟
-    qq.send(Outbound::text("后台任务完成了")).await.unwrap();
-    qq.send(Outbound::text("定时提醒")).await.unwrap();
+    assert_eq!(qq.send(Outbound::text("后台任务完成了")).await.unwrap(), Delivery::Sent);
+    assert_eq!(qq.send(Outbound::text("定时提醒")).await.unwrap(), Delivery::Deferred, "暂存要如实告知调用方");
     let sent: Vec<Value> = http.received_requests().await.unwrap().iter().filter(|r| r.url.path().ends_with("/messages")).map(|r| serde_json::from_slice(&r.body).unwrap()).collect();
     assert_eq!(sent.len(), 1);
     assert!(sent[0].get("msg_id").is_none() && sent[0]["content"] == "后台任务完成了");
@@ -232,9 +232,11 @@ async fn deferred_survives_restart_and_flushes_on_inbound() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!(sent.len(), 1, "相邻文字合并为一条补发");
-    assert_eq!((sent[0]["msg_id"].clone(), sent[0]["content"].clone()), (json!("MSG9"), json!("后台结果一
-
-后台结果二")));
+    assert_eq!(sent[0]["msg_id"], json!("MSG9"));
+    // 补发的第一段注明原定发出时间，之后是按顺序合并的文字
+    let content = sent[0]["content"].as_str().unwrap();
+    assert!(content.starts_with("〔以下消息原定 ") && content.contains("因 QQ 发送次数限制延后到现在〕"), "{content}");
+    assert!(content.ends_with("后台结果一\n\n后台结果二"), "{content}");
     // 已发出的文字与已不存在的文件被确认删除；上传失败的文件及其后的文字原样保留到下次
     let mut left = Vec::new();
     for _ in 0..50 {

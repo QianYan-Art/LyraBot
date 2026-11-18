@@ -8,6 +8,8 @@ use rusqlite::params;
 pub struct Queued {
     pub id: i64,
     pub payload: serde_json::Value,
+    /// 入队时间（毫秒）
+    pub created_at: i64,
 }
 
 impl Store {
@@ -31,12 +33,12 @@ impl Store {
     pub async fn outbox_list(&self, channel: &str) -> Result<Vec<Queued>> {
         let channel = channel.to_owned();
         self.call(move |c| {
-            let mut st = c.prepare_cached("SELECT id, payload FROM outbox WHERE channel=?1 ORDER BY id")?;
-            let rows = st.query_map([channel], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            let mut st = c.prepare_cached("SELECT id, payload, created_at FROM outbox WHERE channel=?1 ORDER BY id")?;
+            let rows = st.query_map([channel], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?;
             let mut out = Vec::new();
             for row in rows {
-                let (id, text) = row?;
-                out.push(Queued { id, payload: serde_json::from_str(&text)? });
+                let (id, text, created_at) = row?;
+                out.push(Queued { id, payload: serde_json::from_str(&text)?, created_at });
             }
             Ok(out)
         })

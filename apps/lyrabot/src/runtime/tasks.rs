@@ -444,6 +444,12 @@ worker_prompt = '{}'
         assert_eq!(rt.state().keepalive_count, 1);
         // 保活请求与正式请求同样剥离视频
         assert!(bodies.lock().unwrap().iter().all(|b| !b.contains("video_url")));
+
+        // 回复被平台暂存后，下一轮如实告诉主对话角色，且只提醒一次
+        rt.mark_undelivered();
+        let _ = rt.run_persona_turn(vec![lyrabot_core::Message::user("你查了吗")], tokio_util::sync::CancellationToken::new()).await;
+        assert!(bodies.lock().unwrap().last().unwrap().contains("没能及时送到"), "下一轮应带上未送达提醒");
+        assert!(rt.state().undelivered_since.is_none(), "提醒后清空");
         std::fs::remove_dir_all(&dir).ok();
     }
 

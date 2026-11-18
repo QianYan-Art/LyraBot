@@ -15,7 +15,7 @@ use lyrabot_orchestra::{AgentCtlTool, DelegateTool, Notify, Supervisor, WorkerKi
 use lyrabot_persona::Persona;
 use lyrabot_persona::learner::{self, Index};
 use lyrabot_persona::pacer::{self, Disposition, PacerConfig, Phase};
-use lyrabot_platform::{Inbound, Outbound, Platform};
+use lyrabot_platform::{Delivery, Inbound, Outbound, Platform};
 use lyrabot_store::{NewSession, SessionKind, SessionRow, Store};
 use lyrabot_tools::{Memory, MemoryTarget};
 use std::path::PathBuf;
@@ -180,6 +180,8 @@ struct State {
     keepalive_epoch: u64,
     /// 当前进行中的保活请求取消令牌
     keepalive_cancel: Option<CancellationToken>,
+    /// 最早一条没能及时送达（被平台暂存待补发）的回复时刻（毫秒）；下一轮告诉主对话角色后清空
+    undelivered_since: Option<i64>,
     last_usage: Usage,
     total_usage: Usage,
 }
@@ -590,9 +592,13 @@ impl Runtime {
                 if stop.is_cancelled() {
                     return;
                 }
-                if let Err(e) = platform.send(Outbound::text(seg.clone())).await {
-                    tracing::warn!(?e, "分段发送失败");
-                    break;
+                match platform.send(Outbound::text(seg.clone())).await {
+                    Ok(Delivery::Sent) => {}
+                    Ok(Delivery::Deferred) => self.mark_undelivered(),
+                    Err(e) => {
+                        tracing::warn!(?e, "分段发送失败");
+                        break;
+                    }
                 }
             }
         }
@@ -603,10 +609,20 @@ impl Runtime {
             }
             // 媒体逐个上传可能较久：/stop 时放弃尚未发出的部分（已发出的保留）
             tokio::select! {
-                _ = platform.send(Outbound { text: String::new(), media: o.media }) => {}
+                r = platform.send(Outbound { text: String::new(), media: o.media }) => {
+                    if matches!(r, Ok(Delivery::Deferred)) {
+                        self.mark_undelivered();
+                    }
+                }
                 _ = stop.cancelled() => {}
             }
         }
+    }
+
+    /// 回复被平台暂存（如 QQ 被动回复次数用完且主动额度不足）：记下最早的时刻，下一轮如实告诉主对话角色。
+    fn mark_undelivered(&self) {
+        let mut st = self.state();
+        st.undelivered_since.get_or_insert_with(|| jiff::Timestamp::now().as_millisecond());
     }
 
     /// 主对话角色一轮请求的完整规格：S1+S2 系统段、轻工具、时间尾注入。
@@ -663,7 +679,22 @@ impl Runtime {
         let c = self.cfg.get();
         let s = self.store.session(self.session()).await?;
         let query: Vec<String> = inputs.iter().map(Message::text).collect();
-        let spec = self.persona_spec(&c, &s, &query.join("\n")).await?;
+        let mut spec = self.persona_spec(&c, &s, &query.join("\n")).await?;
+        // 上一轮有回复没能及时送达：这轮如实告知，避免主对话角色以为早已汇报过
+        let undelivered = self.state().undelivered_since.take();
+        if let Some(at) = undelivered {
+            let kit = self.kit();
+            let note = format!(
+                "〔你在 {} 起的部分回复因 QQ 发送次数限制没能及时送到{}那里，已在{}这次发消息时补发；不要说当时已经汇报过〕",
+                kit.persona.time_label(at),
+                kit.persona.user_name(),
+                kit.persona.user_name()
+            );
+            spec.tail = Some(match spec.tail.take() {
+                Some(t) => format!("{t}\n{note}"),
+                None => note,
+            });
+        }
         tracing::debug!(tail = ?spec.tail, "尾注入");
         Ok(self.kernel.run_turn(&spec, s.id, inputs, &self.queues, cancel).await?)
     }

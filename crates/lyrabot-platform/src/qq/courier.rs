@@ -5,7 +5,7 @@
 use super::State;
 use super::api::{Api, MSG_TYPE_MEDIA, MSG_TYPE_TEXT, file_type_for};
 use super::reply::Route;
-use crate::{Outbound, SendError, SendErrorKind, SendResult};
+use crate::{Delivery, Outbound, SendError, SendErrorKind, SendResult};
 use lyrabot_store::Store;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -39,9 +39,20 @@ fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
+fn beijing() -> jiff::tz::TimeZone {
+    jiff::tz::TimeZone::get("Asia/Shanghai").unwrap_or(jiff::tz::TimeZone::fixed(jiff::tz::offset(8)))
+}
+
 fn quota_key() -> String {
-    let tz = jiff::tz::TimeZone::get("Asia/Shanghai").unwrap_or(jiff::tz::TimeZone::fixed(jiff::tz::offset(8)));
-    format!("qq_proactive:{}", jiff::Timestamp::now().to_zoned(tz).strftime("%Y-%m"))
+    format!("qq_proactive:{}", jiff::Timestamp::now().to_zoned(beijing()).strftime("%Y-%m"))
+}
+
+/// 补发说明，例如“〔以下消息原定 11-18 13:21 发出，因 QQ 发送次数限制延后到现在〕”。
+fn deferred_header(created_ms: i64) -> String {
+    let at = jiff::Timestamp::from_millisecond(created_ms)
+        .map(|t| t.to_zoned(beijing()).strftime("%m-%d %H:%M").to_string())
+        .unwrap_or_default();
+    format!("〔以下消息原定 {at} 发出，因 QQ 发送次数限制延后到现在〕")
 }
 
 fn text_body(text: &str) -> Value {
@@ -72,9 +83,11 @@ impl Courier {
 
     /// 发送一条消息：先文字，再逐个媒体；没有通道的部分进发件箱。媒体失败时补一句文字说明，不静默吞掉。
     pub(crate) async fn send(&self, out: Outbound) -> SendResult {
+        let mut delivery = Delivery::Sent;
         let text = out.text.trim();
         if !text.is_empty() && let Sent::NoRoute = self.route(text_body(text)).await? {
             self.defer_text(text).await?;
+            delivery = Delivery::Deferred;
         }
         for m in &out.media {
             let res = match self.upload(m).await {
@@ -83,17 +96,21 @@ impl Courier {
             };
             match res {
                 Ok(Sent::Delivered) => {}
-                Ok(Sent::NoRoute) => self.defer(json!({"media": m.display().to_string()})).await?,
+                Ok(Sent::NoRoute) => {
+                    self.defer(json!({"media": m.display().to_string()})).await?;
+                    delivery = Delivery::Deferred;
+                }
                 Err(e) => {
                     tracing::warn!(error = %e.message, path = %m.display(), "QQ 媒体发送失败");
                     let note = format!("（有个文件没发出去：{}）", e.message);
                     if let Ok(Sent::NoRoute) = self.route(text_body(&note)).await {
                         self.defer_text(&note).await?;
+                        delivery = Delivery::Deferred;
                     }
                 }
             }
         }
-        Ok(())
+        Ok(delivery)
     }
 
     /// 补发发件箱。新的被动窗口打开后调用；与其他补发串行执行。
@@ -110,19 +127,30 @@ impl Courier {
             return;
         }
         tracing::info!(count = queued.len(), "补发此前延迟的 QQ 消息");
+        // 补发的第一段前注明原定时间，免得用户把旧结果当成刚查到的
+        let mut header = Some(deferred_header(queued[0].created_at));
         let mut batch: (Vec<i64>, Vec<String>) = (Vec::new(), Vec::new());
         for q in queued {
             if let Some(text) = q.payload["text"].as_str() {
+                let text = match header.take() {
+                    Some(h) => format!("{h}\n{text}"),
+                    None => text.to_owned(),
+                };
                 let used: usize = batch.1.iter().map(|t| t.chars().count()).sum();
                 if !batch.0.is_empty() && used + text.chars().count() > MAX_BATCH_CHARS && !self.flush_text(&mut batch).await {
                     return;
                 }
                 batch.0.push(q.id);
-                batch.1.push(text.to_owned());
+                batch.1.push(text);
                 continue;
             }
             // 媒体保持原有顺序：先把前面的文字发出去
             if !self.flush_text(&mut batch).await {
+                return;
+            }
+            if let Some(h) = header.take()
+                && !matches!(self.route(text_body(&h)).await, Ok(Sent::Delivered))
+            {
                 return;
             }
             let path = PathBuf::from(q.payload["media"].as_str().unwrap_or_default());
