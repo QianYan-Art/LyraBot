@@ -53,14 +53,14 @@ assets_dir = "assets/persona"
 
 [persona.keepalive]
 interval_minutes = 25          # 距上次模型请求多少分钟发一次 1-token 保活续期（设为 0 关闭）
-max_count = 9                  # 用户说话后最多连续保活次数（约 3.75 小时，设为 0 关闭）
+max_count = 9                  # 用户说话后最多连续保活次数（约 3.75 小时，设为 0 关闭；遇套餐额度用尽即结束本轮）
 
 # 多代理编排（docs/05-orchestra.md）
 [orchestra]
 default_model = "kimi-for-coding"
 default_effort = "high"
 max_concurrent = 3
-context_window = 131072        # 后台执行者（worker 与专员）上下文窗口上限（128K，主会话的一半）
+context_window = 131072        # 后台执行者（worker 与专员）上下文窗口上限（128K；实际取模型窗口与此值的较小者）
 # compaction_ratio = 0.9        # 后台执行者的压缩触发比例与保留尾部；不写时沿用 [agent]
 # compaction_keep_tokens = 20000
 worker_prompt = "assets/agents/worker.md"
@@ -144,7 +144,7 @@ timeout_s = 120
 # proactive_monthly_quota = 300 # 每月主动消息本地上限（平台为每用户每天 1000 条，此处防失控），用尽后延迟到用户下次说话
 # inbox_dir = "/var/lib/lyrabot/media/inbox"
 
-# 抖音外部服务（docs/06-tools-plugins.md 第 3 节）。服务端允许的调用方为 lyrabot 用户与 lyrabot.service
+# 抖音外部服务（docs/06-tools-plugins.md 第 3 节）。服务端按 UID 只允许 lyrabot 用户调用；发布与短信操作还要求调用方是 lyrabot.service 主进程
 [douyin]
 socket = "/run/lyrabot-douyin/login.sock"
 saved_covers_dir = "/var/lib/lyrabot/workspace/starlibrary_covers"

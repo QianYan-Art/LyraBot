@@ -24,7 +24,7 @@
 
 - 重试：仅对连接错误、429、5xx 做指数退避（尊重 `Retry-After`，单次等待不超过 30 s）；流已开始输出后不重试，交给上层决定。
 - 超时：连接超时可配；错误正文读取有期限并响应取消；SSE 未换行残余上限 8 MB，工具调用索引上限 128。
-- 错误分类：`RateLimited / Auth / BadRequest / ContextOverflow / Transient / Unknown`，上层据此决定压缩或报告。额度用尽时主对话角色如实说明。
+- 错误分类：`RateLimited / QuotaExhausted / Auth / BadRequest / ContextOverflow / Transient / Cancelled / Unknown`（流式响应中途的 `error` 事件按正文识别额度用尽，其余记为 `Unknown`），上层据此决定压缩或报告。额度用尽时主对话角色如实说明，缓存保活结束本轮。
 
 ## 2. 内核（lyrabot-agent，pi 式）
 

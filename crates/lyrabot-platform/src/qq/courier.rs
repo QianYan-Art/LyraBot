@@ -136,7 +136,8 @@ impl Courier {
                     Some(h) => format!("{h}\n{text}"),
                     None => text.to_owned(),
                 };
-                let used: usize = batch.1.iter().map(|t| t.chars().count()).sum();
+                // 合并时每段之间多两个换行，一并计入批次上限
+                let used: usize = batch.1.iter().map(|t| t.chars().count() + 2).sum();
                 if !batch.0.is_empty() && used + text.chars().count() > MAX_BATCH_CHARS && !self.flush_text(&mut batch).await {
                     return;
                 }

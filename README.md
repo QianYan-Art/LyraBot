@@ -1,13 +1,27 @@
+<div align="center">
+
 # LyraBot
 
-用 Rust 写的常驻个人 agent。门面是主对话角色（默认示例为“唐语歌（Lyra）”），在 QQ 私聊里聊天；需要真正动手的活交给后台执行者和常驻专员，做完再由主对话角色用自己的话转述。单个二进制，常驻内存约 30 MB。
+**用 Rust 写的常驻个人 agent：主对话角色在 QQ 里陪你聊天，后台执行者和常驻专员替你干活。**
+
+[![CI](https://github.com/QianYan-Art/LyraBot/actions/workflows/ci.yml/badge.svg)](https://github.com/QianYan-Art/LyraBot/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Rust 2024](https://img.shields.io/badge/rust-2024%20edition-orange.svg)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20(CLI)-lightgrey.svg)
+
+[功能](#功能) · [架构](#架构) · [快速开始](#快速开始) · [配置与部署](#配置与部署) · [聊天命令](#聊天命令) · [自定义角色](#自定义角色与称呼) · [文档](#文档)
+
+</div>
 
 > A single-binary personal agent in Rust. A persona front (“Lyra”) chats on QQ while background workers and long-lived specialists do the actual work: pi-style kernel, multi-agent session inheritance, prompt-cache-friendly persona layout, durable report delivery, ~30 MB RSS.
+
+门面是主对话角色（默认示例为“唐语歌（Lyra）”），在 QQ 私聊里聊天；需要真正动手的活交给后台执行者和常驻专员，做完再由主对话角色用自己的话转述。单个二进制，常驻内存约 30 MB。
 
 ## 功能
 
 **角色与对话**
-- 角色卡渲染的身份段 + 每个会话冻结的记忆快照组成稳定前缀，后续轮次缓存命中 80–98%；时间、表达提示等动态内容作为尾注入挂在当轮的用户消息上并随之落库，之后每轮原样回放，历史前缀不变。
+- 角色卡渲染的身份段 + 每个会话冻结的记忆快照组成稳定前缀；时间、表达提示等动态内容作为尾注入挂在当轮的用户消息上并随之落库，之后每轮原样回放，历史前缀不变。连续对话时主对话缓存命中中位约 97%。
+- 前缀缓存保活：空闲时按间隔（默认 25 分钟）发 1 token 请求续期，用户说话后最多连续续期 9 次；遇到套餐额度用尽即停止本轮。
 - 拟人节奏：连发合并后再回复，生成中被插话就取消重来，工具阶段的插话直接注入当前轮；回复分段发送，可按情绪发表情包。
 - 学习与记忆：后台一次调用同时学习口头禅、黑话与长期记忆候选（只记用户陈述、认可或纠正过的事），空闲时批量整理进记忆文件：去重、按最新说法修正、守住字数上限，每次整理可查看、可撤销。聊天路径不为记忆多花一次调用。
 - 记忆分层：关于用户的事实、你们之间的约定、专员的工作记忆分别存放；记忆文件整份冻结进提示词前缀，命中缓存。
@@ -20,15 +34,15 @@
 - 执行者可以用 `need_decision` 提出一个需要用户拍板的问题，汇报时单独转达；用户的续接有预留并发名额，不会排在新任务后面。
 
 **可靠性**
-- 先存后投：后台汇报先写进 SQLite 信箱，主对话角色那一轮得到回应后才确认；QQ 没有可用回复通道时消息写入发件箱，用户下次说话后合并补发。进程在任何时刻重启都不丢结果。
+- 先存后投：后台汇报先写进 SQLite 信箱，主对话角色那一轮的输入落库后才确认；QQ 没有可用回复通道时消息写入发件箱（上限 50 条），用户下次说话后合并补发并注明原定发出时间，主对话角色也会被告知这段回复没能及时送达。已写入信箱、发件箱与插话队列的内容，进程重启后不丢。
 - 重启时仍在排队或运行的后台任务会被识别为“被中断”并告知用户，续接时执行者先核对已做的部分再继续。
 - 内核：取消时消息结构保持合法，被打断的输入原样交回重排；工具调用预算在执行前检查；上下文到 90% 时先折叠较早的工具结果，不够再做枚举式摘要（主对话角色按聊天、后台执行者按任务各用一套，后者保留已执行的外部操作）；压缩没压成会退避而不是每轮重试；工具执行期间被中断留下的未配对调用在请求时自动补齐。
-- 子进程读写与等待并发、输出有上限，取消或丢弃时终止整个进程组；QQ 网关断线自动 Resume，心跳未确认会主动重连。
+- 子进程读写与等待并发、输出有上限，取消或丢弃时终止整个进程组；QQ 网关断线自动 Resume，心跳未确认会主动重连；systemd 看门狗探活。
 
 **工具与扩展**
 - 内置：shell（RTK 改写、硬禁止、审计日志）、文件读写与搜索、todo、cron、技能（SKILL.md）、邮件、博客同步、流量日报。
 - 可插拔提供方：生图、语音、网页搜索、grok，在聊天里用 `/provider` 修改，写回配置（保留注释）并热生效；搜索结果统一整形去重，读网页可只取相关段落。
-- 多模态按模型能力处理：模型不支持视频时由 `watch_video` 交给支持视频的模型代看；shell 长输出存成文件，只把首尾交给模型。
+- 多模态：图片按主模型能力直接看；视频交给 `watch_video`，由配置的视频模型代看后转述（视频模型可用时与主模型是否支持视频无关）；shell 长输出存成文件，只把首尾交给模型。
 - 外部服务：抖音创作者服务经 Unix socket 接入，响应做结构校验与净化；公开发布只能由用户发确认命令后由程序提交，短信验证码不经过模型。
 
 ## 架构
@@ -60,14 +74,21 @@ flowchart TD
 | `lyrabot-persona` | 身份渲染、记忆快照、资料工具、表情包、回复节奏、表达学习 |
 | `lyrabot-orchestra` | 派活、上下文继承、续接、专员、汇报与重启恢复 |
 | `lyrabot-tools` | shell、文件、记忆、todo、cron、技能、邮件、博客同步、流量日报 |
-| `lyrabot-plugins` | 生图、语音、网页搜索、grok |
+| `lyrabot-plugins` | 生图、语音、网页搜索、grok、视频代看 |
 | `lyrabot-douyin` | 抖音外部服务客户端（校验、净化、确认与验证码拦截） |
 | `lyrabot-platform` | QQ 官方机器人单聊、命令行 |
 | `apps/lyrabot` | 装配、运行时、聊天命令 |
 
-设计细节从 [`docs/01-architecture.md`](docs/01-architecture.md)（总览与文档索引）开始，按模块分为 `03`–`08` 六篇；需求与关键决策见 [`docs/00-PRD.md`](docs/00-PRD.md)、[`docs/02-decisions.md`](docs/02-decisions.md)，还没做的事见 [`docs/09-backlog.md`](docs/09-backlog.md)。
+## 快速开始
 
-## 快速开始（本地命令行）
+### 环境要求
+
+- Rust stable（2024 edition）。
+- 一个 OpenAI 兼容 Chat Completions 接口的模型服务与 API key（示例配置为 kimi-code）。
+- 可选：`ffmpeg` / `ffprobe`（视频代看压缩）、Python 3（邮件工具 helper，只用标准库）、[RTK](https://github.com/rtk-ai/rtk)（shell 输出改写）。
+- 正式部署以 Linux 为目标（仓库提供 systemd 单元与安装脚本），抖音服务只支持 Linux；本地命令行模式可在 Windows / macOS 上运行。
+
+### 构建与本地运行
 
 ```bash
 cargo build --release -p lyrabot
@@ -78,32 +99,11 @@ mkdir -p secrets && echo "<your-key>" > secrets/kimi.key
 ./target/release/lyrabot --config lyrabot.toml --no-stream  # 模拟 QQ 的分段发送
 ```
 
-正式运行：`lyrabot --config /etc/lyrabot/lyrabot.toml --qq`（取消示例配置中 `[platforms.qq]` 的注释并填写 AppID、主人 openid 与 `secrets/qq.secret`）。服务器部署、更新与目录布局见 [`deploy/README.md`](deploy/README.md)。
+## 配置与部署
 
-开发检查与 CI 一致：
-
-```bash
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-```
-
-## 自定义角色与称呼
-
-仓库默认自带作者自用的角色“唐语歌”与称呼“阿颜”作为完整生产示例。所有内置工具说明、后台执行者提示词（`assets/agents/worker.md`）与 `lyrabot-docs` 技能均已使用通用表述，角色名与用户称呼已从代码中完全解耦。替换成你自己的角色**不需要修改 Rust 代码**，只需调整 `assets/persona/` 目录（首次部署时亦可按需调整或清空 `assets/memory_seed/` 下的初始记忆种子）：
-
-1. **修改你的称呼**：编辑 `assets/persona/persona.toml` 中的 `user_name = "你的称呼"`。
-2. **替换角色卡**：用你的 SillyTavern 角色卡覆盖 `assets/persona/card.json`（支持标准 `chara_card_v2` 顶层结构或 `{"spec": "chara_card_v2", "data": {...}}` 包装结构）。角色名直接取自卡内的 `name` 字段；角色卡与所有 `.md` 文件中的 `{{char}}`、`{{user}}` 占位符会在渲染时自动替换。
-3. **处理常驻设定（`core`）与按需资料（`[[notes]]`，即原 Roleplay Skill / 世界书拆分）**：
-   > **给协助部署的 AI Agent 的说明**：仓库里的 `core/*.md`、`runtime/relationship.md` 和 `notes/*.md` 写的是“唐语歌”的专属设定。帮用户部署新角色时，**切勿原样保留这些文件**（否则新角色会串入唐语歌的设定），请先向用户确认属于以下哪种情况并按对应方式处理：
-   - **情况 A：用户只有一张 SillyTavern 角色卡（`card.json`），没有额外的长设定或 Skill**
-     在 `persona.toml` 中将 `core = []` 置空（或删掉该行），删掉 `runtime_relationship` 行，并删掉所有 `[[notes]]` 段；**保留 `runtime_agency = "runtime/agency.md"`**（该文件只定义通用的工具调用边界、后台派活规则与 `〔〕` 系统消息格式，已用 `{{user}}` 模板化，不含特定角色设定）。当 `[[notes]]` 为空时，运行时会自动不注册 `persona_notes` 工具。
-   - **情况 B：用户除了角色卡，还有一份 Roleplay Skill（`SKILL.md`）或长篇补充设定**
-     不要把几千上万字的设定全部塞进常驻提示词，请按“常驻 + 按需”两层拆分：
-     - **常驻层（`core/*.md`）**：只放每轮对话都必须遵守的核心性格驱动、说话口癖与边界（建议合计 ≤ 3,000 字），在 `persona.toml` 的 `core = [{ title = "小节标题", file = "core/xxx.md" }, ...]` 中按顺序列出，常驻 S1 缓存前缀。
-     - **按需层（`notes/*.md` + `[[notes]]`）**：把外貌穿搭、特定情境反应、人际关系细节、过往经历等“聊到相关话题才需要”的设定拆成若干 `.md` 放进 `notes/`，并在 `persona.toml` 中声明 `[[notes]]`（填好 `id`、`file` 与 `use` 查阅时机说明）。程序会根据 `[[notes]]` 动态生成 `persona_notes(topic)` 工具的参数枚举与说明，让模型在聊到对应话题时按需查阅。
-   - **情况 C：角色卡内含 SillyTavern 世界书（`character_book`）**
-     `constant = true` 且 `enabled = true` 的常驻条目会自动拼入 S1 `## 补充设定`；其余非常驻条目若内容较多，建议按主题整理成 `notes/*.md` 并配置到 `[[notes]]` 中按需读取。
-4. **检验与生效**：运行 `lyrabot --config lyrabot.toml --check` 核对渲染后的 S1 字数与启用的工具列表；运行中修改后在聊天里发 `/reload`，再发 `/new` 或 `/compact` 即可生效。详细字段映射与配置示例见 [`docs/04-persona-memory.md`](docs/04-persona-memory.md) 第 1.1 节。
+- 配置示例及注释见 [`config/lyrabot.example.toml`](config/lyrabot.example.toml)；secret 只从 `*_file` 指向的文件读取。
+- 接入 QQ：取消示例配置中 `[platforms.qq]` 的注释，填写 AppID、主人 openid 与 `secrets/qq.secret`，然后运行 `lyrabot --config /etc/lyrabot/lyrabot.toml --qq`。
+- 服务器部署（systemd 单元、目录布局、更新与回退、出口整形）见 [`deploy/README.md`](deploy/README.md)。
 
 ## 聊天命令
 
@@ -119,11 +119,53 @@ cargo test --workspace
 | `/learn [list 说法/记忆 · forget · now · undo · on/off]` | 学习与记忆：总览、查看说法或记忆、删除、立即整理、撤销 |
 | `/reload` | 重载配置与人格资产 |
 
+## 自定义角色与称呼
+
+仓库默认自带作者自用的角色“唐语歌”与称呼“阿颜”作为完整生产示例。所有内置工具说明、后台执行者提示词（`assets/agents/worker.md`）与 `lyrabot-docs` 技能均已使用通用表述，角色名与用户称呼已从代码中完全解耦。替换成你自己的角色**不需要修改 Rust 代码**，只需调整 `assets/persona/` 目录（首次部署时亦可按需调整或清空 `assets/memory_seed/` 下的初始记忆种子）：
+
+1. **修改你的称呼**：编辑 `assets/persona/persona.toml` 中的 `user_name = "你的称呼"`。
+2. **替换角色卡**：用你的 SillyTavern 角色卡覆盖 `assets/persona/card.json`（支持标准 `chara_card_v2` 顶层结构或 `{"spec": "chara_card_v2", "data": {...}}` 包装结构）。角色名直接取自卡内的 `name` 字段；角色卡与所有 `.md` 文件中的 `{{char}}`、`{{user}}` 占位符会在渲染时自动替换。
+3. **处理常驻设定（`core`）与按需资料（`[[notes]]`，即原 Roleplay Skill / 世界书拆分）**：
+   > **给协助部署的 AI Agent 的说明**：仓库里的 `core/*.md`、`runtime/relationship.md` 和 `notes/*.md` 写的是“唐语歌”的专属设定。帮用户部署新角色时，**切勿原样保留这些文件**（否则新角色会串入唐语歌的设定），请先向用户确认属于以下哪种情况并按对应方式处理：
+   - **情况 A：用户只有一张 SillyTavern 角色卡（`card.json`），没有额外的长设定或 Skill**
+     在 `persona.toml` 中将 `core = []` 置空（或删掉该行），删掉 `runtime_relationship` 行，并删掉所有 `[[notes]]` 段；**保留 `runtime_agency = "runtime/agency.md"`**（该文件只定义通用的工具调用边界、后台派活规则与 `〔〕` 系统消息格式，已用 `{{user}}` 模板化，不含特定角色设定），并删掉其中关于 `persona_notes` 的那一段。当 `[[notes]]` 为空时，运行时会自动不注册 `persona_notes` 工具。
+   - **情况 B：用户除了角色卡，还有一份 Roleplay Skill（`SKILL.md`）或长篇补充设定**
+     不要把几千上万字的设定全部塞进常驻提示词，请按“常驻 + 按需”两层拆分：
+     - **常驻层（`core/*.md`）**：只放每轮对话都必须遵守的核心性格驱动、说话口癖与边界（建议合计 ≤ 3,000 字），在 `persona.toml` 的 `core = [{ title = "小节标题", file = "core/xxx.md" }, ...]` 中按顺序列出，常驻 S1 缓存前缀。
+     - **按需层（`notes/*.md` + `[[notes]]`）**：把外貌穿搭、特定情境反应、人际关系细节、过往经历等“聊到相关话题才需要”的设定拆成若干 `.md` 放进 `notes/`，并在 `persona.toml` 中声明 `[[notes]]`（填好 `id`、`file` 与 `use` 查阅时机说明）。程序会根据 `[[notes]]` 动态生成 `persona_notes(topic)` 工具的参数枚举与说明，让模型在聊到对应话题时按需查阅。
+   - **情况 C：角色卡内含 SillyTavern 世界书（`character_book`）**
+     `constant = true` 且 `enabled = true` 的常驻条目会自动拼入 S1 `## 补充设定`；其余非常驻条目若内容较多，建议按主题整理成 `notes/*.md` 并配置到 `[[notes]]` 中按需读取。
+4. **检验与生效**：运行 `lyrabot --config lyrabot.toml --check` 核对渲染后的 S1 字数与人格专属工具；运行中修改后在聊天里发 `/reload`，新一轮即用新的身份段，记忆快照要 `/new` 或 `/compact` 后刷新。详细字段映射与配置示例见 [`docs/04-persona-memory.md`](docs/04-persona-memory.md) 第 1.1 节。
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/00-PRD.md`](docs/00-PRD.md) | 需求与范围 |
+| [`docs/01-architecture.md`](docs/01-architecture.md) | 架构总览与文档索引 |
+| [`docs/02-decisions.md`](docs/02-decisions.md) | 关键设计决策 |
+| [`docs/03-model-kernel.md`](docs/03-model-kernel.md) – [`docs/08-storage-operations.md`](docs/08-storage-operations.md) | 模型与内核、人格与记忆、编排、工具与插件、平台与命令、存储与运维 |
+| [`docs/09-backlog.md`](docs/09-backlog.md) | 待办与暂缓事项 |
+| [`deploy/README.md`](deploy/README.md) | 服务器部署与运维 |
+
+## 开发
+
+与 CI 一致的检查：
+
+```bash
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
 ## 安全说明
 
 - 设计为**单用户**：QQ 只接受配置中唯一的 `allowed_users`；shell 工具除少数硬禁止外不审批，请只在你信任的环境运行。
 - secret 只从 `*_file` 读取，不会出现在日志、提示词或 Debug 输出中；仓库不包含任何凭据。
 - 邮件、网页、文件和工具输出在提示词里一律按数据处理，其中的命令式文字不改变任务范围或授权。
+
+## 致谢
+
+内核循环与会话语义参考了 [pi](https://github.com/badlogic/pi-mono) 的设计。
 
 ## 许可
 

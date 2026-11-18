@@ -47,14 +47,14 @@
 ## 3. 构建与部署
 
 - 本地：cargo-zigbuild 交叉编译到 `x86_64-unknown-linux-gnu`（目标机 Debian 13 x86_64，命令见 `deploy/README.md`），只从干净且已推送的提交构建；二进制内嵌构建提交（有未提交改动时带 `-dirty`），`lyrabot --version`、`--check` 与 `/status` 首行显示。
-- 部署：产物上传为 `/opt/lyrabot/bin/lyrabot.new`，保留 `lyrabot.prev` 后替换并 `systemctl restart lyrabot`；同一提交的 `persona/ agents/ tools/ skills/` 与 `docs/`（`docs/*.md`、`deploy/README.md` 改名 `deploy.md`、`config/lyrabot.example.toml`）一并同步，并写入 `/opt/lyrabot/VERSION`。只改人格或技能时同步对应目录后在 QQ 发 `/reload`。涉及数据库迁移的版本，停服前先在线备份数据库，稳定后删除备份。
+- 部署：产物上传为 `/opt/lyrabot/bin/lyrabot.new`，保留 `lyrabot.prev` 后替换并 `systemctl restart lyrabot`；同一提交的 `persona/ agents/ tools/ skills/` 与 `docs/`（`docs/*.md`、`deploy/README.md` 改名 `deploy.md`、`config/lyrabot.example.toml`）一并同步，并写入 `/opt/lyrabot/VERSION`。只改人格资产或已有技能的正文时，同步对应目录后在 QQ 发 `/reload`；新增技能或改技能描述需重启。涉及数据库迁移的版本，停服前先在线备份数据库，稳定后删除备份。
 - 运行用户 `lyrabot`（加入 `blogsync`、`lyrabot-douyin` 组）；邮件 SSH key 与 Komari 配置在 `/etc/lyrabot/secrets/`。首次安装用 `deploy/install.sh`，布局、RTK 升级、隔离测试与人工操作抖音浏览器等步骤见 `deploy/README.md`。
 - 回滚：只用上一版二进制 `lyrabot.prev`；Hermes 已于 2026-11-08 完全移除，不再能回滚到 Hermes。
 - 统一基线：本机 `git rev-parse --short=12 HEAD`、GitHub `main`、服务器 `/opt/lyrabot/VERSION` 与 `/status` 首行应一致。
 
 ## 4. 调试与协作约定
 
-- 子代理默认 `claude-haiku-5-5`、思考等级 xhigh，最多 3 个并行，写入范围互不重叠。
+- 开发时的子代理模型与并行数按所用编码宿主的当前规则；并行时写入范围互不重叠。
 - 代码疑难问题可在终端调用本机 `codex` CLI 做只读 debug 分析；结论需回到代码和测试中验证。
 - 开发检查与 CI 一致：`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`。
 - 不提交、不推送，除非用户当次授权；secret 文件全部被 `.gitignore` 排除。

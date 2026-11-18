@@ -32,7 +32,8 @@ fn save(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<PathBuf> {
 }
 
 /// 校验并取出一组封面的双槽预览；返回去掉 base64 后的封面描述与预览文件路径。
-pub fn decode_covers(covers: &Value, expected_source: Option<&str>, cache: &Path) -> Result<(Value, Vec<PathBuf>), String> {
+/// 校验封面响应并取出 JPEG 预览。`cache` 为 None 时只校验、不落盘（预览不发给用户）。
+pub fn decode_covers(covers: &Value, expected_source: Option<&str>, cache: Option<&Path>) -> Result<(Value, Vec<PathBuf>), String> {
     let list = covers.as_array().filter(|a| a.len() <= 5).ok_or("covers 响应无效")?;
     let mut clean = Vec::new();
     let mut files = Vec::new();
@@ -49,6 +50,7 @@ pub fn decode_covers(covers: &Value, expected_source: Option<&str>, cache: &Path
         }
         let previews = o.get("previews").and_then(Value::as_array).filter(|p| p.len() == 2).ok_or("预览响应无效")?;
         let mut seen = Vec::new();
+        let mut checked = Vec::new();
         for p in previews {
             let po = p.as_object().filter(|m| m.len() == 2).ok_or("JPEG 预览响应无效")?;
             let format = po.get("format").and_then(Value::as_str).filter(|f| matches!(*f, "landscape" | "portrait") && !seen.contains(f)).ok_or("JPEG 预览响应无效")?;
@@ -62,8 +64,13 @@ pub fn decode_covers(covers: &Value, expected_source: Option<&str>, cache: &Path
                 _ => return Err("JPEG 预览尺寸无效".into()),
             }
             seen.push(format);
-            let name = format!("{}.jpg", hex::encode(Sha256::digest(&data)));
-            files.push(save(cache, &name, &data).map_err(|e| format!("保存预览失败：{e}"))?);
+            checked.push(data);
+        }
+        if let Some(cache) = cache {
+            for data in &checked {
+                let name = format!("{}.jpg", hex::encode(Sha256::digest(data)));
+                files.push(save(cache, &name, data).map_err(|e| format!("保存预览失败：{e}"))?);
+            }
         }
         let mut cc = o.clone();
         cc.insert("previews".into(), json!(seen.iter().map(|f| json!({"format": f})).collect::<Vec<_>>()));
@@ -205,13 +212,17 @@ mod tests {
             "source": "paired_images",
             "previews": [{"format": "landscape", "jpeg_base64": b(jpeg(320, 240))}, {"format": "portrait", "jpeg_base64": b(jpeg(240, 320))}]
         }]);
-        let (clean, files) = decode_covers(&cover, Some("paired_images"), &cache).unwrap();
+        let (clean, files) = decode_covers(&cover, Some("paired_images"), Some(&cache)).unwrap();
         assert_eq!(files.len(), 2);
         assert_eq!(clean[0]["previews"], json!([{"format": "landscape"}, {"format": "portrait"}]));
-        assert!(decode_covers(&cover, Some("qq_image"), &cache).is_err(), "来源不符");
+        assert!(decode_covers(&cover, Some("qq_image"), Some(&cache)).is_err(), "来源不符");
+        // 不落盘时仍完整校验，但不产生要发送的文件
+        let (_, none) = decode_covers(&cover, Some("paired_images"), None).unwrap();
+        assert!(none.is_empty());
         let mut bad = cover.clone();
         bad[0]["previews"][0]["jpeg_base64"] = json!(b(jpeg(100, 100)));
-        assert!(decode_covers(&bad, None, &cache).is_err(), "预览尺寸不符");
+        assert!(decode_covers(&bad, None, Some(&cache)).is_err(), "预览尺寸不符");
+        assert!(decode_covers(&bad, None, None).is_err(), "不落盘时同样校验");
         let _ = std::fs::remove_dir_all(&cache);
     }
 }

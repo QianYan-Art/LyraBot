@@ -685,7 +685,7 @@ impl Runtime {
         if let Some(at) = undelivered {
             let kit = self.kit();
             let note = format!(
-                "〔你在 {} 起的部分回复因 QQ 发送次数限制没能及时送到{}那里，已在{}这次发消息时补发；不要说当时已经汇报过〕",
+                "〔你在 {} 起的部分回复因发送次数限制没能及时送到{}那里，已暂存并会在{}发消息时补发（注明原定时间）；不要说当时已经汇报过〕",
                 kit.persona.time_label(at),
                 kit.persona.user_name(),
                 kit.persona.user_name()

@@ -473,7 +473,7 @@ class ContentManager:
                 cover = await asyncio.to_thread(
                     self.covers.import_image, request["release_id"], image, source="saved_image",
                 )
-                return response("ready", "本地制作素材已导入为单图候选封面，尚未应用；请核对预览或使用两张适配素材配对。", cover=cover)
+                return response("ready", "本地制作素材已导入为配对素材，尚未应用；请用 cover_pair 与另一比例的素材配对后核对双槽预览。", cover=cover)
             if action == "cover_pair":
                 cover = await asyncio.to_thread(
                     self.covers.pair,

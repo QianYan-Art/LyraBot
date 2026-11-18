@@ -88,7 +88,7 @@ impl DouyinContent {
 已有封面优先用 cover_library 浏览（可传 release_id 筛选、offset 按 next_offset 翻页），区分来源并检查双槽预览。\
 已在固定制作目录放好素材时，用 cover_saved_sources 加 release_id 查看本地候选及实际比例，不要让用户重新发送或传任意路径；分别用两张候选的 image_id 调 cover_import_saved 入库，再用 cover_pair 传 landscape_cover_id 和 portrait_cover_id 组合，单图导入只是一个候选。\
 QQ 图片可用 cover_sources / cover_import 单图入库。复用库中封面用 cover_reuse（目标 release_id、来源 from_release_id、来源 cover_id），取得目标的新 cover_id 后再 prepare，不能把别的作品的旧 ID 直接用于目标作品。\
-封面预览会自动发出供核对。选定后用 prepare（必须传 cover_id）确认标题、简介、封面、可见范围和可选定时（publish_at 带时区）；prepare 返回 plan.plan_id，stage/resume_stage/draft 必须完整传入，不缩略。\
+封面预览会自动发出供核对；只有 cover_import_saved 导入的制作目录单图不发预览，它只是配对素材，配对后由 cover_pair 发出那两张双槽预览。选定后用 prepare（必须传 cover_id）确认标题、简介、封面、可见范围和可选定时（publish_at 带时区）；prepare 返回 plan.plan_id，stage/resume_stage/draft 必须完整传入，不缩略。\
 需要发布时用 stage 上传并生成平台待确认预览；editor_ready 只表示预览就绪，不等于已获授权。要存草稿就调用 draft。\
 公开发布不由你执行：stage 完成后提醒在 QQ 私聊发送“确认发布 <plan_id>”，程序会直接提交并跟进；你没有、也不需要发布动作。\
 上传是后台任务，in_progress 时如实汇报当前阶段并结束本轮，不要循环轮询；之后可用 job 查询同一任务。预览最长有效 15 分钟，stage 后不要调用 login/status/metrics 或另一次 prepare（会导航使预览失效），job 查询不会导航。\
@@ -203,13 +203,21 @@ impl DouyinContent {
         };
         let mut v = dy.client.content(request).await.map_err(|e| format!("抖音内容服务暂不可用或响应无效（{e}）；操作结果未知，请先查询状态，不要重复提交。"))?;
         let mut media = Vec::new();
+        let installs_cover = matches!(action.as_str(), "cover_import" | "cover_import_saved" | "cover_pair" | "cover_reuse");
+        if installs_cover && v["ok"] == true && v.get("cover").is_none() {
+            return Err("封面服务报告成功但没有返回封面；入库结果未知，请先用 cover_library 核对，不要重复导入。".into());
+        }
         if let Some(covers) = v.get("covers").cloned() {
-            let (clean, files) = decode_covers(&covers, None, &dy.cache_dir)?;
+            let (clean, files) = decode_covers(&covers, None, Some(&dy.cache_dir))?;
             v["covers"] = clean;
             media.extend(files);
         } else if let Some(cover) = v.get("cover").cloned() {
             let expected = (action == "cover_pair").then_some("paired_images");
-            let (clean, files) = decode_covers(&json!([cover]), expected, &dy.cache_dir)?;
+            // 制作目录导入的单图只是配对素材，塞进另一比例的槽位会补边，预览没有参考价值；只在配对后发双槽预览
+            let cache = (action != "cover_import_saved").then_some(dy.cache_dir.as_path());
+            let (clean, files) = decode_covers(&json!([cover]), expected, cache).map_err(|e| {
+                if installs_cover { format!("{e}；服务端可能已入库，请先用 cover_library 核对，不要重复导入。") } else { e }
+            })?;
             v["cover"] = clean[0].clone();
             media.extend(files);
         }

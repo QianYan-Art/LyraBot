@@ -545,7 +545,7 @@ try {
     }
 
     $inspectCmd = "python3 -c `"import json, os, sys; from pathlib import Path; sys.path.insert(0, '$ServerSource'); from releases import ReleaseStore, manifests_have_same_content, validate_manifest; expected = validate_manifest(json.loads(Path('$RemoteTempDir/manifest.json').read_text(encoding='utf-8'))); store = ReleaseStore('/var/lib/lyrabot-douyin'); pkg = store.releases_dir / '$ReleaseId'; print(json.dumps({'state': 'missing'}) if not os.path.lexists(pkg) else (json.dumps({'state': 'conflict'}) if not manifests_have_same_content({k:v for k,v in store.load('$ReleaseId').items() if k != 'video_path'}, expected) else json.dumps({'state': 'same', 'hash': store.load('$ReleaseId')['video_sha256'], 'bytes': store.load('$ReleaseId')['video_bytes']})))`""
-    $inspectRaw = & ssh @SshCommon $Destination $inspectCmd
+    $inspectRaw = & ssh @SshCommon $Destination (ConvertTo-NativeArg $inspectCmd)
     if ($LASTEXITCODE -ne 0) {
         throw "远端作品状态检查失败。"
     }
@@ -576,12 +576,12 @@ try {
 
     Write-Host "`n[4/4] 正在服务器上校验 SHA-256 并原子安装到 /var/lib/lyrabot-douyin/releases/$ReleaseId/ ..." -ForegroundColor Green
     $installCmd = "python3 '$ServerSource/stage_release.py' install --source-dir '$RemoteTempDir'"
-    $installOut = & ssh @SshCommon $Destination $installCmd
+    $installOut = & ssh @SshCommon $Destination (ConvertTo-NativeArg $installCmd)
     if ($LASTEXITCODE -ne 0) {
         throw "远端 stage_release.py install 安装失败。"
     }
 
-    $verifyRaw = & ssh @SshCommon $Destination $inspectCmd
+    $verifyRaw = & ssh @SshCommon $Destination (ConvertTo-NativeArg $inspectCmd)
     if ($LASTEXITCODE -ne 0) {
         throw "安装后远端核验失败。"
     }

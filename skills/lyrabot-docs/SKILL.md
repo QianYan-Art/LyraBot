@@ -26,4 +26,4 @@ LyraBot（lyrabot）是用 Rust 构建的常驻个人 agent。回答关于系统
 | 实际运行配置 | `/etc/lyrabot/lyrabot.toml`（只读查看；`/etc/lyrabot/secrets/` 是凭据，不读取、不复述） | — |
 | 部署的提交号 | `/opt/lyrabot/VERSION` | `git rev-parse --short=12 HEAD` |
 
-文档较长时先用 fs_search 按关键词定位章节，再读相关片段。文档与代码或实际运行结果冲突时，以代码和运行结果为准，并如实说明差异。
+文档较长时先用 fs_search 按关键词定位章节，再读相关片段；当前没有 fs_search 等文件工具时，把检索交给后台执行者。文档与代码或实际运行结果冲突时，以代码和运行结果为准，并如实说明差异。

@@ -8,9 +8,9 @@
 | 段 | 内容 | 变化频率 |
 |---|---|---|
 | S1 身份（system） | 角色卡渲染 + 常驻资料 + 关系默认 + 能力与边界 | 几乎不变 → 缓存前缀 |
-| S2 记忆快照（system） | `user.md`（关于用户，`#<user_name>`）+ `memory.md`（约定与共同的事），各 ≤2000 字 | 每个会话冻结；新会话或压缩时刷新 |
+| S2 记忆快照（system） | `user.md`（标题 `## 关于<user_name>`）+ `memory.md`（标题 `## 你的备忘`，约定与共同的事），各 ≤2000 字 | 每个会话冻结；新会话或压缩时刷新 |
 | 历史 | 会话树当前分支（含〔后台结果〕〔定时提醒〕等系统消息） | 追加 |
-| 尾注入（附在本轮最后一条 user 消息后） | 当前时间 + ≤3 条说法提示（≤220 字） | 每轮生成，随该消息落库并原样回放 |
+| 尾注入（附在本轮最后一条 user 消息后） | 当前时间 + ≤3 条说法提示（≤220 字）；上一轮有回复被平台暂存时再加一句未送达提醒 | 每轮生成，随该消息落库并原样回放 |
 
 人格资产目录 `assets/persona/`（部署时复制到 `/opt/lyrabot/persona/`）：
 
@@ -28,9 +28,9 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料（persona
 - S1 渲染顺序：`# <角色名>` + 身份优先级说明 → 关系默认 → 核心描述 → 性格 → 聊天准则 → 常驻资料 → 示例对话 → 补充设定（角色书常驻条目）→ 能力与边界；`{{user}}/{{char}}` 自动替换为 `persona.toml` 的 `user_name` 与 `card.json` 的 `name`（仓库默认示例角色卡为“唐语歌”、用户称呼为“阿颜”）。默认全量配置约 7,600 字；2026-11-08 服务器实测：极短对话首轮输入约 6.9k token，其中固定前缀约 6.1k，后续轮次缓存命中 80–98%。
 - S2 会话创建时生成并冻结在 kv `persona_s2:<session>`，压缩后刷新，保证同一会话前缀字节稳定；记忆改动因此在新会话或压缩后生效。
 - 尾注入（当前时间 + 与本轮输入相关的表达提示）：每轮挂在本轮最后一条 user 输入的 `Message.tail` 上，随消息落库；每次请求由 `lyrabot_agent::wire_messages` 合并进该消息末尾文本段（纯文本保持单字符串 `content`，含图片/视频时追加文本段），因此同轮工具续轮与之后各轮看到的历史前缀都与当初发出的字节一致，跨轮命中缓存；主对话角色也能看到每条历史消息当时的时间。`Message::text()` 不含尾注入，学习器、过往对话检索与压缩摘要看到的仍是原话。被取消后重新排队的输入会先清掉旧尾注入。本轮没有 user 输入时退回为只在请求里临时附加（不落库）。
-- 前缀缓存保活（`[persona.keepalive]`）：订阅端点前缀缓存有效期约 30 分钟（早先约 20 分钟）。主会话在完成模型请求后按 `interval_minutes`（默认 25 分钟；2026-11-15 起在服务器试行，15 次保活在空闲 1505–1528 秒时发出，命中 96–100%，故改为默认）用下一轮正式请求将使用的前缀（同模型、同思考等级、同系统段、同工具列表、已落库的历史，经与正式请求相同的 `wire_messages` 组装）发送 `max_tokens = 1` 的保活请求续期，结果丢弃不落库；单次用户说话后最多连续保活 `max_count` 次（默认 9 次，约 3.75 小时），之后自动停止直到用户再次说话。用户发消息、切换会话/模型、重载配置或 `/stop` 时立即取消进行中的保活请求并通过代次（`keepalive_epoch`）拒绝旧轮次/旧保活写回；保活遇到套餐额度用尽（`QuotaExhausted`，5h/7d/30d 窗口）时直接结束本轮、不再按间隔重试：失败的保活续不上缓存，额度恢复后的首次保活只是冷前缀全价预热；网络、5xx 与普通限流仍按原样计一次、等下一个间隔。用户再说话时计数清零重新开始。设为 0 可关闭。
+- 前缀缓存保活（`[persona.keepalive]`）：订阅端点前缀缓存有效期约 30 分钟（早先约 20 分钟）。主会话在完成模型请求后按 `interval_minutes`（默认 25 分钟；2026-11-15 起在服务器试行，15 次保活在空闲 1505–1528 秒时发出，命中 96–100%，故改为默认）用下一轮正式请求将使用的前缀（同模型、同思考等级、同系统段、同工具列表、已落库的历史，经与正式请求相同的 `wire_messages` 组装）发送 `max_tokens = 1` 的保活请求续期，结果丢弃不落库；单次用户说话后最多连续保活 `max_count` 次（默认 9 次，约 3.75 小时），之后自动停止直到用户再次说话。用户发消息时取消进行中的保活请求并清零计数；切换会话/模型、重载配置或 `/stop` 时还会递增代次（`keepalive_epoch`），拒绝旧轮次/旧保活写回；保活遇到套餐额度用尽（`QuotaExhausted`，5h/7d/30d 窗口）时直接结束本轮、不再按间隔重试：失败的保活续不上缓存，额度恢复后的首次保活只是冷前缀全价预热；网络、5xx 与普通限流仍按原样计一次、等下一个间隔。用户再说话时计数清零重新开始。设为 0 可关闭。
 - 角色按需设定通过专用轻工具 `persona_notes(topic)` 提供，条目与用途由 `persona.toml` 的 `[[notes]]` 动态生成并写在工具说明里。工作风格 `assets/agents/worker.md` 不进入主对话角色提示，留给后台执行者；运维流程位于专员记忆种子（`assets/memory_seed/`）。
-- 主对话角色只用轻工具：`persona.tools` 默认 image_generate、speak、web_search、cron、skill_view、recall，另有人格专属 persona_notes、delegate、agent_ctl、memory、sticker；注册了 watch_video 时自动带上，此时主对话一律不直接收视频，统一交给 `video_model` 代看（与主模型是否标 `video` 无关；watch_video 不可用时才按主模型能力内联）。重活经 delegate 派出（见 `05-orchestra.md`）。
+- 主对话角色只用轻工具：`persona.tools` 默认 image_generate、speak、web_search、cron、skill_view、recall，另有人格专属 persona_notes、delegate、agent_ctl、memory、sticker；注册了 watch_video 时自动带上。watch_video 已注册且当前配置的 `video_model` 可用时，主对话不直接收视频，统一交给它代看（与主模型是否标 `video` 无关）；任一条件不满足时按主模型能力内联。重活经 delegate 派出（见 `05-orchestra.md`）。
 - 派活时 task 照用户的原话写，不自己补充没说的范围或指标，拿不准先问。
 - 主对话角色不会主动开口：答应“到时候提醒你”这类有时间的事，当场用 cron 设好并告诉用户（具体某天的用一次性提醒），时间未定先问清楚。
 - 渲染卫生由 `crates/lyrabot-persona/tests/persona.rs` 断言（首块为身份、段落顺序、无 Hermes/UI/占位符残留、重复渲染字节一致）。
@@ -61,7 +61,7 @@ notes/{appearance,behavior,relationship,life_events}.md   按需资料（persona
 | `card` | 选填（默认 `"card.json"`） | 角色卡路径（相对 `assets/persona/`） |
 | `core` | 选填（默认 `[]`） | 常驻在 S1（位于 `## 聊天准则` 之后、`## 示例对话` 之前）的资料列表，每项为 `{ title = "小节标题", file = "core/xxx.md" }`（文件中的一级标题自动剥离，其余标题降一级） |
 | `runtime_relationship` | 选填 | 关系默认说明（如单用户关系背景），插入在 `# <name>` 之后、`## 核心描述` 之前 |
-| `runtime_agency` | 选填（**建议保留**） | 默认指向 `"runtime/agency.md"`，定义真实操作以工具为准、轻重活分流（`delegate` / `cron`）与 `〔〕` 系统消息协议，内部已使用 `{{user}}` 占位符 |
+| `runtime_agency` | 选填（**建议保留**） | 省略时为空；示例填 `"runtime/agency.md"`，定义真实操作以工具为准、轻重活分流（`delegate` / `cron`）与 `〔〕` 系统消息协议，内部已使用 `{{user}}` 占位符 |
 | `[[notes]]` | 选填（默认 `[]`） | 按需资料列表，每项含 `id`（枚举值）、`file`（Markdown 路径）、`use`（何时查阅的一句话说明）。为空时不注册 `persona_notes` 工具 |
 
 **方式一：仅使用 SillyTavern 角色卡（最简配置，无额外 Skill / 按需资料）**
@@ -102,7 +102,7 @@ file = "notes/life_events.md"
 use = "聊到过去的事、家庭、成长经历或世界观背景时"
 ```
 
-运行时会自动根据 `[[notes]]` 构造 `persona_notes(topic)` 工具的 JSON Schema 枚举与描述，模型聊到相关话题时才会调用读取，日常闲聊或技术问答不占前缀 token。
+运行时会自动根据 `[[notes]]` 构造 `persona_notes(topic)` 工具的 JSON Schema 枚举与描述，模型聊到相关话题时才会调用读取；资料正文不占前缀 token，工具说明与条目枚举仍随请求发送。
 
 ## 2. Pacer（回复节奏）
 
