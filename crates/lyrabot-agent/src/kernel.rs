@@ -96,6 +96,22 @@ pub struct TurnSpec {
     pub strip_video: bool,
 }
 
+impl TurnSpec {
+    /// 固定前缀（系统段 + 工具定义）的 token 估算。这部分每次请求都要带上，
+    /// 压缩阈值与 `/status` 的上下文占用都必须算进去：只数历史消息会在长人格卡下明显低估，
+    /// 上下文早已接近窗口却迟迟不压缩，直到请求超窗被模型拒绝。
+    pub fn fixed_tokens(&self) -> u64 {
+        let sys: usize = self.system.iter().map(|s| s.chars().count()).sum();
+        let tool_chars: usize = self
+            .tools
+            .specs()
+            .iter()
+            .map(|t| serde_json::to_string(t).map(|s| s.chars().count()).unwrap_or(0))
+            .sum();
+        context::estimate_tokens(sys + tool_chars)
+    }
+}
+
 /// 会话级消息队列（与 pi 语义一致）。
 #[derive(Default)]
 pub struct Queues {
@@ -250,6 +266,8 @@ impl Kernel {
         let mut last_sig: Option<String> = None;
         let mut repeats = 0u32;
         let mut last_prompt_tokens = 0u64;
+        // 固定前缀每次请求都带上：只数历史消息会低估上下文（长人格卡尤其明显）
+        let fixed_est = spec.fixed_tokens();
         let mut error = None;
 
         let outcome_reason = loop {
@@ -258,7 +276,7 @@ impl Kernel {
             }
             let mut ctx = self.context(session).await?;
             let pending_est: u64 = unpersisted.iter().map(|m| context::estimate_tokens(m.char_len())).sum();
-            let mut est = context::estimate_messages(&ctx).max(last_prompt_tokens) + pending_est;
+            let mut est = (context::estimate_messages(&ctx) + fixed_est).max(last_prompt_tokens) + pending_est;
             if (est as f64) >= spec.context_window as f64 * spec.compaction.ratio && !self.compact_backed_off(session, est) {
                 let result = self.compact(spec, session, &ctx, est, &cancel).await;
                 // 压缩期间被取消：与生成被打断同样处理，未落库的输入经 unconsumed 交回
@@ -268,7 +286,8 @@ impl Kernel {
                 match result {
                     Ok(CompactOutcome::Summarized | CompactOutcome::Folded) => {
                         ctx = self.context(session).await?;
-                        est = context::estimate_messages(&ctx) + pending_est;
+                        // 不再取 last_prompt_tokens：它是压缩前那次请求的用量，取大会让任务风格在压缩成功后仍判为超窗而停止
+                        est = context::estimate_messages(&ctx) + fixed_est + pending_est;
                     }
                     Ok(outcome) => {
                         self.compact_backoff.lock().expect("compact_backoff 锁中毒").insert(session, est);

@@ -733,6 +733,30 @@ impl Runtime {
         Ok(())
     }
 
+    /// 平台不再有输入时（命令行 stdin 读到 EOF）把已缓冲的消息与本轮跑完再退出：
+    /// 否则管道送进来的最后一段话会停在去抖缓冲里，一条请求都不发就被丢掉。最多等 `timeout`。
+    pub async fn drain(self: &Arc<Self>, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let (phase, busy) = {
+                let st = self.state();
+                (st.phase, st.has_work())
+            };
+            if phase == Phase::Idle {
+                if !busy {
+                    return;
+                }
+                // 预算之内把缓冲的消息排进一轮
+                self.clone().arm_timer();
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!("等待未处理的消息超时，仍有内容未处理即退出");
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     /// 退出前停下主对话角色当前一轮。后台任务不主动取消：保留运行标记，重启后作为“被中断”汇报交回，
     /// 而不是误报成“被要求停止”；其子进程随服务的 cgroup 一起结束。
     pub async fn shutdown(&self) {

@@ -358,13 +358,9 @@ mod tests {
         format!("http://{addr}")
     }
 
-    #[tokio::test]
-    async fn keepalive_stops_on_quota_and_persona_delegates_video() {
-        use std::sync::atomic::{AtomicU16, Ordering};
-        let status = std::sync::Arc::new(AtomicU16::new(429));
-        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let base = fake_llm(status.clone(), bodies.clone());
-        let dir = std::env::temp_dir().join(format!("lyrabot-rt-ka-{}", std::process::id()));
+    /// 指向本地假模型服务的最小运行时，返回运行时与其数据目录（测试结束后删除）。
+    async fn test_runtime(base: &str, tag: &str) -> (std::sync::Arc<crate::runtime::Runtime>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("lyrabot-rt-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let key = dir.join("k.key");
@@ -413,6 +409,16 @@ worker_prompt = '{}'
         let cfg_path = dir.join("lyrabot.toml");
         std::fs::write(&cfg_path, toml).unwrap();
         let rt = std::sync::Arc::new(crate::runtime::Runtime::open(lyrabot_config::ConfigHandle::open(&cfg_path).unwrap()).await.unwrap());
+        (rt, dir)
+    }
+
+    #[tokio::test]
+    async fn keepalive_stops_on_quota_and_persona_delegates_video() {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        let status = std::sync::Arc::new(AtomicU16::new(429));
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = fake_llm(status.clone(), bodies.clone());
+        let (rt, dir) = test_runtime(&base, "ka").await;
         let due = || std::time::Instant::now().checked_sub(std::time::Duration::from_secs(120));
 
         // 主对话：代看可用时即使主模型支持视频也不内联；video_model 失效（如重载后）时退回按主模型能力处理
@@ -450,6 +456,23 @@ worker_prompt = '{}'
         let _ = rt.run_persona_turn(vec![lyrabot_core::Message::user("你查了吗")], tokio_util::sync::CancellationToken::new()).await;
         assert!(bodies.lock().unwrap().last().unwrap().contains("没能及时送到"), "下一轮应带上未送达提醒");
         assert!(rt.state().undelivered_since.is_none(), "提醒后清空");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn drain_runs_buffered_input_before_exit() {
+        // 命令行 stdin 读到 EOF 时，去抖缓冲里的最后一句必须先跑完一轮再退出，而不是一条请求都不发就丢掉
+        let status = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(400));
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base = fake_llm(status, bodies.clone());
+        let (rt, dir) = test_runtime(&base, "drain").await;
+        rt.clone().attach(std::sync::Arc::new(lyrabot_platform::cli::CliPlatform::new(false)));
+        rt.state().pending.push(lyrabot_core::Message::user("你好"));
+        rt.drain(std::time::Duration::from_secs(20)).await;
+        assert!(bodies.lock().unwrap().iter().any(|b| b.contains("你好")), "缓冲的输入应发出请求");
+        let st = rt.state();
+        assert!(st.phase == crate::runtime::Phase::Idle && !st.has_work(), "drain 返回时应已空闲且无待处理内容");
+        drop(st);
         std::fs::remove_dir_all(&dir).ok();
     }
 

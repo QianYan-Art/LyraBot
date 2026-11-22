@@ -101,15 +101,25 @@ async fn serve(runtime: Arc<Runtime>, platform: Arc<dyn Platform>) -> Result<()>
             watchdog::spawn(n.clone(), every, platform, runtime.store().clone());
         }
     }
+    // 平台正常结束（命令行 stdin EOF）时先把已收到的消息处理完再退出，避免最后一句停在去抖缓冲里被丢掉；
+    // 收到停止信号时不等待，直接退出。
+    let mut graceful = false;
     let result = loop {
         tokio::select! {
             msg = rx.recv() => match msg {
                 Some(m) => runtime.clone().handle(m).await,
-                None => break Ok(()),
+                // 平台任务结束时发送端随之关闭，消息先全部投递完才会走到这里
+                None => {
+                    graceful = true;
+                    break Ok(());
+                }
             },
             r = &mut reader => {
                 break match r {
-                    Ok(Ok(())) => Ok(()),
+                    Ok(Ok(())) => {
+                        graceful = true;
+                        Ok(())
+                    }
                     Ok(Err(e)) => Err(anyhow::anyhow!("平台退出：{e}")),
                     Err(e) => Err(anyhow::anyhow!("平台任务异常：{e}")),
                 };
@@ -120,6 +130,9 @@ async fn serve(runtime: Arc<Runtime>, platform: Arc<dyn Platform>) -> Result<()>
             }
         }
     };
+    if graceful {
+        runtime.clone().drain(std::time::Duration::from_secs(120)).await;
+    }
     if let Some(n) = &notifier {
         n.send("STOPPING=1");
     }

@@ -149,7 +149,9 @@ impl Runtime {
                 let mut spec = self.persona_spec(&c, &s, "").await?;
                 spec.tail = None;
                 let ctx = self.kernel.context(s.id).await?;
-                let est = lyrabot_agent::context::estimate_messages(&ctx);
+                // 与自动压缩同一口径：历史消息 + 固定前缀（系统段与工具定义），
+                // 否则压缩前的占用被低估，折叠收益的判断会把“仍然超窗”误判成“已经够用”。
+                let est = lyrabot_agent::context::estimate_messages(&ctx) + spec.fixed_tokens();
                 let compacted = self.kernel.compact(&spec, s.id, &ctx, est, &CancellationToken::new()).await?;
                 self.refresh_snapshot(s.id).await?;
                 self.state().reset_keepalive(true);
@@ -249,7 +251,9 @@ impl Runtime {
         let s = self.store.session(self.session()).await?;
         let info = model_info(&c, &s.model)?;
         let ctx = self.kernel.context(s.id).await?;
-        let est = lyrabot_agent::context::estimate_messages(&ctx);
+        // 与自动压缩同一口径：历史消息 + 固定前缀（系统段与工具定义）。
+        // 不用 last_usage 校准：它是整轮多次请求的累计值，且在 /new、/compact 后不清零，会让占用虚高
+        let est = lyrabot_agent::context::estimate_messages(&ctx) + self.persona_spec(&c, &s, "").await?.fixed_tokens();
         let workers = self.sup.running();
         let (phase, pending, last, total) = {
             let st = self.state();

@@ -64,7 +64,7 @@ pub trait Tool: Send + Sync {
 ### 2.3 会话树与压缩
 
 - 会话以条目树存储（SQLite `entries`：`id, session_id, parent_id, kind, payload, tokens, created_at`），会话记录当前叶子 `leaf_id`。分叉 = 新会话指向父会话某条目，零拷贝。
-- 压缩策略按会话给出（`TurnSpec.compaction`，2026-11-13）：触发比例、保留尾部、压缩风格与时间标注。主对话角色用 `[agent] compaction_ratio / compaction_keep_tokens`（默认 90%、20k）与聊天风格；后台执行者与专员用 `[orchestra]` 同名项（未配置时沿用 `[agent]`）与任务风格。`/compact` 立即执行。token 本地按字符近似估算，每轮用服务端 usage 校准。
+- 压缩策略按会话给出（`TurnSpec.compaction`，2026-11-13）：触发比例、保留尾部、压缩风格与时间标注。主对话角色用 `[agent] compaction_ratio / compaction_keep_tokens`（默认 90%、20k）与聊天风格；后台执行者与专员用 `[orchestra]` 同名项（未配置时沿用 `[agent]`）与任务风格。`/compact` 立即执行。token 本地按字符近似估算，口径为历史消息加固定前缀（系统段与工具定义），`/status` 与 `/compact` 共用；同一轮内的后续请求再用上一次服务端 usage 校准。
 - 先折叠（2026-11-08，借鉴 Sodium 记忆系统）：切分点之前的工具结果在上下文中替换为一行占位（追加一条 `fold` 条目，原文不动）；折叠后低于窗口 60% 就到此为止，不调用模型。
 - 再摘要：仍不够时做“枚举式”摘要，输出 `{summary, capsule}`。聊天风格先清点对方说过的事实与近况、约定与提醒、称呼与偏好、纠正过的地方与未转述的后台结果，保留具体日期，胶囊只在有进行中的事时写；任务风格清点精确路径、命令、报错原文、编号、要求与决定，并在胶囊中列出已执行的外部操作（`side_effects`，续接时避免重复）。记录稿中图片、视频写成 `[图片]`、`[视频：路径]` 占位；聊天风格给用户消息标注落库时间（按人设时区），工具结果截得更短。胶囊含目标、要求与约束、已确认决定、已执行的外部操作、验证状态、下一步，由 `render_compaction` 按固定标签确定性渲染（每项 ≤8 条、每条 ≤150 字、胶囊 ≤1200 字），写入 `compaction` 条目；构建上下文时通过 `Store::context_branch` 从叶子回溯到最近的 compaction 条目的 `first_kept` 锚点即停，避免长寿命会话每次都读取并反序列化早已被压缩覆盖的远古条目。不是 JSON 时当作纯文本摘要；JSON 残缺时只取出其中能解析的 `summary` 字段，取不到才按无摘要处理，不把残骸写进摘要。
 - 结果分四种（`CompactOutcome`）：已摘要、仅折叠、无可压缩内容（切分点前只剩上次的摘要，或全部内容都在保留尾部内）、摘要为空；`/compact` 分别给出说明。自动压缩只有生成了摘要才刷新主对话角色的记忆快照（`Compacted { summarized: true }`）；手动 `/compact` 不论结果都刷新当前会话的记忆快照（记忆工具与 `/learn forget` 提示的“新会话或 /compact 后生效”依赖这一点）。

@@ -532,3 +532,24 @@ async fn padded_placeholder_is_not_counted_as_fold_savings() {
     assert_ne!(out, lyrabot_agent::CompactOutcome::Folded);
     assert!(!k.store().branch(sid).await.unwrap().iter().any(|e| e.kind == EntryKind::Fold));
 }
+
+#[tokio::test]
+async fn compaction_counts_fixed_system_prefix() {
+    // 固定前缀（系统段 + 工具定义）本身已接近窗口时，压缩阈值必须把它算进去：
+    // 否则历史消息还很短时永远不触发压缩，直到请求真的超窗被模型拒绝。
+    let p = Fake::new(vec![Message::assistant("摘要内容"), Message::assistant("回答")]);
+    let (k, spec, sid) = setup(p.clone(), vec![], 1000).await;
+    let mut spec = TurnSpec { system: vec!["长".repeat(4000)], ..spec };
+    // 聊天风格：压不下来时照常回复（任务风格在固定前缀本身超窗时会直接停止，另有测试覆盖）
+    spec.compaction.style = lyrabot_agent::CompactStyle::Chat;
+    // 先攒出可切分的历史（user → assistant → user）
+    for m in [Message::user("甲"), Message::assistant("好"), Message::user("乙")] {
+        k.append_messages(sid, &[m]).await.unwrap();
+    }
+    let out = k.run_turn(&spec, sid, vec![Message::user("丙")], &Queues::default(), CancellationToken::new()).await.unwrap();
+    assert_eq!(out.text, "回答");
+    let compact_reqs = p.reqs().iter().filter(|r| r.system.iter().any(|s| s.contains("负责压缩"))).count();
+    assert_eq!(compact_reqs, 1, "固定前缀占窗口 90% 以上时必须先压缩");
+    let last = p.reqs().pop().unwrap();
+    assert!(last.messages[0].text().starts_with(SUMMARY_PREFIX), "压缩后的请求应带摘要");
+}
