@@ -193,19 +193,42 @@ async fn image_error_in_200_is_failure() {
 }
 
 #[tokio::test]
-async fn speak_validates_wav() {
+async fn speak_sends_clean_text_with_scene() {
+    // 表情会让工作站合成失败、Markdown 会被读出来；不选语气时固定用 soft，不交给工作站按关键词猜
     let s = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/tts"))
-        .and(body_partial_json(json!({"text": "早安", "media_type": "wav", "scene": "温柔"})))
+        .and(body_partial_json(json!({"text": "早安呀，今天也要加油", "media_type": "wav", "scene": "soft"})))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(wav()))
+        .expect(1)
+        .mount(&s)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/tts"))
+        .and(body_partial_json(json!({"text": "抱歉让你久等了", "scene": "apology"})))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(wav()))
+        .expect(1)
         .mount(&s)
         .await;
     let (h, _d) = host(&s.uri());
     let sp = Speak::new(h.clone());
-    let out = sp.call(ctx(), json!({"text": "早安", "scene": "温柔"})).await;
+    let out = sp.call(ctx(), json!({"text": "**早安呀**，今天也要加油 😊✨"})).await;
     assert!(!out.is_error && out.media[0].extension().unwrap() == "wav", "{}", out.text);
+    let out = sp.call(ctx(), json!({"text": "抱歉让你久等了", "scene": "apology"})).await;
+    assert!(!out.is_error, "{}", out.text);
 
+    // 未知语气与只剩符号的文本在本地拒绝，不发请求（上面两个 mock 的 expect(1) 兜底）
+    let out = sp.call(ctx(), json!({"text": "你好", "scene": "温柔"})).await;
+    assert!(out.is_error && out.text.contains("可选"), "{}", out.text);
+    let out = sp.call(ctx(), json!({"text": "😊 **"})).await;
+    assert!(out.is_error && out.text.contains("没有可以念出来的文字"), "{}", out.text);
+    // 超出单次上限的长文案本地拒绝并提示拆分：合成出的 WAV 会超过 QQ 9 MB 上传上限
+    let out = sp.call(ctx(), json!({"text": "念".repeat(601)})).await;
+    assert!(out.is_error && out.text.contains("拆开"), "{}", out.text);
+}
+
+#[tokio::test]
+async fn speak_rejects_truncated_wav() {
     let bad = MockServer::start().await;
     let mut cut = wav();
     cut.truncate(60);

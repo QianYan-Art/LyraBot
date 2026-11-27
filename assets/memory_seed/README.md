@@ -11,7 +11,7 @@
 
 未迁移到任何记忆的 Hermes 条目（已由新架构的工具/人格资产承担）：
 - 用户称呼：角色卡与 persona.toml 的 user_name 已覆盖。
-- TTS 用法：并入任务 12 的 speak 工具说明（scene/profile/reference 优先级、工作站离线如实说明）。
+- TTS 用法：并入任务 12 的 speak 工具说明（固定语气选项、工作站离线如实说明）。
 - 表情包用法：并入任务 07 的 sticker 工具（不再用 MEDIA: 路径与方括号占位）。
 - 生图调用规则：并入任务 12 的 image_generate 工具说明。
 - 本地缓存路径速查：属于 Hermes 目录结构，LyraBot 有自己的布局（`docs/08-storage-operations.md` 第 1 节）。
